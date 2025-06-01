@@ -232,8 +232,172 @@ class Dashboard:
             </div>
             
             <script>
-                // Vue.js アプリケーションの実装
-                // 実際の実装では、より詳細なコードが必要
+                const { createApp } = Vue;
+                
+                createApp({
+                    data() {
+                        return {
+                            metrics: {
+                                entropy: 0,
+                                vdi: 0,
+                                fcr: 0,
+                                speed: 0
+                            },
+                            lambda: {
+                                a: 0.3,
+                                c: 0.3,
+                                s: 0.1
+                            },
+                            blackboardMessages: [],
+                            promptInput: '',
+                            systemStatus: {
+                                ram: 0,
+                                cpu: 0
+                            },
+                            websocket: null,
+                            chart: null
+                        }
+                    },
+                    mounted() {
+                        this.initWebSocket();
+                        this.initChart();
+                        this.fetchData();
+                    },
+                    methods: {
+                        initWebSocket() {
+                            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                            const url = `${protocol}//${window.location.host}/ws`;
+                            
+                            this.websocket = new WebSocket(url);
+                            
+                            this.websocket.onopen = () => {
+                                console.log('WebSocket connected');
+                                this.websocket.send(JSON.stringify({
+                                    type: 'subscribe',
+                                    channel: 'all'
+                                }));
+                            };
+                            
+                            this.websocket.onmessage = (event) => {
+                                const data = JSON.parse(event.data);
+                                this.handleWebSocketMessage(data);
+                            };
+                            
+                            this.websocket.onclose = () => {
+                                console.log('WebSocket disconnected');
+                                setTimeout(() => this.initWebSocket(), 5000);
+                            };
+                        },
+                        
+                        handleWebSocketMessage(data) {
+                            if (data.type === 'metrics') {
+                                this.metrics = { ...this.metrics, ...data.data };
+                                this.updateChart();
+                            } else if (data.type === 'blackboard') {
+                                this.blackboardMessages = data.data.messages || [];
+                            }
+                        },
+                        
+                        initChart() {
+                            const ctx = document.getElementById('metricsChart').getContext('2d');
+                            this.chart = new Chart(ctx, {
+                                type: 'line',
+                                data: {
+                                    labels: [],
+                                    datasets: [
+                                        {
+                                            label: 'Entropy',
+                                            data: [],
+                                            borderColor: 'rgb(75, 192, 192)',
+                                            tension: 0.1
+                                        },
+                                        {
+                                            label: 'VDI',
+                                            data: [],
+                                            borderColor: 'rgb(255, 99, 132)',
+                                            tension: 0.1
+                                        },
+                                        {
+                                            label: 'FCR',
+                                            data: [],
+                                            borderColor: 'rgb(54, 162, 235)',
+                                            tension: 0.1
+                                        }
+                                    ]
+                                },
+                                options: {
+                                    responsive: true,
+                                    maintainAspectRatio: false,
+                                    scales: {
+                                        y: {
+                                            beginAtZero: true
+                                        }
+                                    }
+                                }
+                            });
+                        },
+                        
+                        updateChart() {
+                            const now = new Date().toLocaleTimeString();
+                            
+                            // データポイントを追加
+                            this.chart.data.labels.push(now);
+                            this.chart.data.datasets[0].data.push(this.metrics.entropy);
+                            this.chart.data.datasets[1].data.push(this.metrics.vdi);
+                            this.chart.data.datasets[2].data.push(this.metrics.fcr);
+                            
+                            // 最大50ポイントに制限
+                            if (this.chart.data.labels.length > 50) {
+                                this.chart.data.labels.shift();
+                                this.chart.data.datasets.forEach(dataset => dataset.data.shift());
+                            }
+                            
+                            this.chart.update();
+                        },
+                        
+                        async fetchData() {
+                            try {
+                                // メトリクスを取得
+                                const metricsResponse = await fetch('/api/metrics');
+                                const metrics = await metricsResponse.json();
+                                this.metrics = { ...this.metrics, ...metrics };
+                                
+                                // BlackBoardデータを取得
+                                const blackboardResponse = await fetch('/api/blackboard');
+                                const blackboard = await blackboardResponse.json();
+                                this.blackboardMessages = blackboard.messages || [];
+                                
+                            } catch (error) {
+                                console.error('Error fetching data:', error);
+                            }
+                        },
+                        
+                        async injectPrompt() {
+                            if (!this.promptInput.trim()) return;
+                            
+                            try {
+                                const response = await fetch('/api/inject', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({ prompt: this.promptInput })
+                                });
+                                
+                                const result = await response.json();
+                                if (result.status === 'success') {
+                                    this.promptInput = '';
+                                    alert('Prompt injected successfully!');
+                                } else {
+                                    alert('Error injecting prompt: ' + result.message);
+                                }
+                            } catch (error) {
+                                console.error('Error injecting prompt:', error);
+                                alert('Error injecting prompt');
+                            }
+                        }
+                    }
+                }).mount('#app');
             </script>
         </body>
         </html>
@@ -257,30 +421,77 @@ class Dashboard:
     async def _fetch_metrics(self) -> Dict[str, Any]:
         """メトリクスを取得"""
         try:
-            # 実際の実装では、メトリクスサーバーからデータを取得
-            # ここではダミーデータを返す
-            return {
-                "entropy": 4.5,
-                "vdi": 0.7,
-                "fcr": 0.9,
-                "speed": 15.2
-            }
+            if self.bb:
+                # BlackBoardからパラメータを取得
+                lambda_a = await self.bb.get_param("λ_a") or 0.3
+                lambda_c = await self.bb.get_param("λ_c") or 0.3
+                lambda_s = await self.bb.get_param("λ_s") or 0.1
+                
+                # メッセージ数からエントロピーとVDIを推定
+                messages = await self.bb.pull(k=100)
+                entropy = len(messages) * 0.1 if messages else 0
+                vdi = min(len(messages) / 50.0, 1.0) if messages else 0
+                fcr = 0.8 + (len(messages) % 10) * 0.02  # 仮のFCR値
+                speed = 10.0 + (len(messages) % 20) * 0.5  # 仮の速度値
+                
+                return {
+                    "entropy": entropy,
+                    "vdi": vdi,
+                    "fcr": fcr,
+                    "speed": speed,
+                    "lambda_a": lambda_a,
+                    "lambda_c": lambda_c,
+                    "lambda_s": lambda_s
+                }
+            else:
+                # ダミーデータ
+                return {
+                    "entropy": 4.5,
+                    "vdi": 0.7,
+                    "fcr": 0.9,
+                    "speed": 15.2,
+                    "lambda_a": 0.3,
+                    "lambda_c": 0.3,
+                    "lambda_s": 0.1
+                }
         except Exception as e:
             print(f"Error fetching metrics: {e}")
-            return {}
+            return {
+                "entropy": 0,
+                "vdi": 0,
+                "fcr": 0,
+                "speed": 0,
+                "lambda_a": 0.3,
+                "lambda_c": 0.3,
+                "lambda_s": 0.1
+            }
     
     async def _fetch_blackboard(self) -> Dict[str, Any]:
         """BlackBoardの情報を取得"""
         try:
             if self.bb:
-                messages = self.bb.pull(k=20)
-                return {"messages": messages}
+                messages = await self.bb.pull(k=20)
+                formatted_messages = []
+                for i, message in enumerate(messages):
+                    if isinstance(message, dict):
+                        formatted_messages.append({
+                            "agent_id": message.get("agent_id", "Unknown"),
+                            "text": message.get("text", str(message)),
+                            "timestamp": message.get("timestamp", "")
+                        })
+                    else:
+                        formatted_messages.append({
+                            "agent_id": i % 3 + 1,  # ダミーのエージェントID
+                            "text": str(message),
+                            "timestamp": ""
+                        })
+                return {"messages": formatted_messages}
             else:
                 # ダミーデータ
                 return {
                     "messages": [
-                        {"agent_id": 1, "text": "Hello, world!"},
-                        {"agent_id": 2, "text": "How are you?"}
+                        {"agent_id": 1, "text": "Hello, world!", "timestamp": ""},
+                        {"agent_id": 2, "text": "How are you?", "timestamp": ""}
                     ]
                 }
         except Exception as e:
@@ -291,8 +502,15 @@ class Dashboard:
         """プロンプトを注入"""
         try:
             print(f"Injecting prompt: {prompt}")
-            # 実際の実装では、BlackBoardにプロンプトを注入
-            return {"status": "success"}
+            if self.bb and prompt.strip():
+                # BlackBoardにプロンプトを注入（正しいシグネチャで呼び出し）
+                agent_id = 999  # UIからの注入を示すための特別なID
+                text = f"[INJECTED] {prompt}"
+                await self.bb.push(agent_id, text)
+                print(f"Prompt successfully injected to BlackBoard")
+                return {"status": "success", "message": "Prompt injected successfully"}
+            else:
+                return {"status": "error", "message": "BlackBoard not available or empty prompt"}
         except Exception as e:
             print(f"Error injecting prompt: {e}")
             return {"status": "error", "message": str(e)}

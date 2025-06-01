@@ -47,7 +47,7 @@ class MetaController:
         self.early_stop = False
         self.last_update = time.time()
     
-    def adjust_lambda(self, stats: Dict[str, float]) -> Dict[str, float]:
+    async def adjust_lambda(self, stats: Dict[str, float]) -> Dict[str, float]:
         """
         統計情報に基づいてλパラメータを調整
         
@@ -60,9 +60,9 @@ class MetaController:
         調整後のλパラメータ
         """
         # 現在のλパラメータを取得
-        λ_c = self.bb.get('λ_c', 0.3)
-        λ_a = self.bb.get('λ_a', 0.3)
-        λ_s = self.bb.get('λ_s', 0.1)
+        λ_c = await self.bb.get_param('λ_c', 0.3)
+        λ_a = await self.bb.get_param('λ_a', 0.3)
+        λ_s = await self.bb.get_param('λ_s', 0.1)
         
         # エントロピー誤差を計算
         err = stats['entropy'] - self.target_H
@@ -87,7 +87,7 @@ class MetaController:
             λ_s_new = λ_s
         
         # Q学習による調整（状態を離散化）
-        state = self._discretize_state(stats)
+        state = await self._discretize_state(stats)
         action = self._select_action(state)
         
         # 行動に基づいてλを微調整
@@ -101,13 +101,13 @@ class MetaController:
             λ_a = self._clamp(λ_a - 0.02, 0.0, 1.0)
         
         # スパイク検知によるEarlyStop
-        if abs(err) > 5.0 or stats.get('speed', 0) < 0.5 * self.bb.get('base_speed', 10.0):
+        if abs(err) > 5.0 or stats.get('speed', 0) < 0.5 * await self.bb.get_param('base_speed', 10.0):
             self.early_stop = True
         
         # BlackBoardにパラメータを設定
-        self.bb.set_param('λ_c', λ_c_new)
-        self.bb.set_param('λ_a', λ_a)
-        self.bb.set_param('λ_s', λ_s_new)
+        await self.bb.set_param('λ_c', λ_c_new)
+        await self.bb.set_param('λ_a', λ_a)
+        await self.bb.set_param('λ_s', λ_s_new)
         
         # 調整後のλパラメータを返す
         return {
@@ -120,7 +120,7 @@ class MetaController:
         """値を指定範囲に制限"""
         return max(min_val, min(max_val, value))
     
-    def _discretize_state(self, stats: Dict[str, float]) -> str:
+    async def _discretize_state(self, stats: Dict[str, float]) -> str:
         """
         連続的な状態を離散化
         
@@ -152,7 +152,7 @@ class MetaController:
         
         # 速度を離散化 (低/中/高)
         speed = stats.get('speed', 0)
-        base_speed = self.bb.get('base_speed', 10.0)
+        base_speed = await self.bb.get_param('base_speed', 10.0)
         if speed < 0.7 * base_speed:
             s_state = 'low'
         elif speed > 1.3 * base_speed:
@@ -207,7 +207,7 @@ class MetaController:
         max_next_Q = np.max(self.Q[next_state])
         self.Q[state][action] += self.alpha * (reward + self.gamma * max_next_Q - self.Q[state][action])
     
-    def calculate_reward(self, stats: Dict[str, float]) -> float:
+    async def calculate_reward(self, stats: Dict[str, float]) -> float:
         """
         現在の状態に対する報酬を計算
         
@@ -231,7 +231,7 @@ class MetaController:
         
         # 速度に基づく報酬
         speed = stats.get('speed', 0)
-        base_speed = self.bb.get('base_speed', 10.0)
+        base_speed = await self.bb.get_param('base_speed', 10.0)
         speed_ratio = speed / base_speed if base_speed > 0 else 0
         speed_reward = min(speed_ratio, 1.0)
         
@@ -251,35 +251,35 @@ class MetaController:
         while not self.early_stop:
             # 統計情報を取得
             stats = {
-                'entropy': self.bb.get('entropy', 0.0),
-                'vdi': self.bb.get('vdi', 0.0),
-                'fcr': self.bb.get('fcr', 0.0),
-                'speed': self.bb.get('speed', 0.0)
+                'entropy': await self.bb.get_param('entropy', 0.0),
+                'vdi': await self.bb.get_param('vdi', 0.0),
+                'fcr': await self.bb.get_param('fcr', 0.0),
+                'speed': await self.bb.get_param('speed', 0.0)
             }
             
             # 現在の状態を取得
-            state = self._discretize_state(stats)
+            state = await self._discretize_state(stats)
             
             # 行動を選択
             action = self._select_action(state)
             
             # λパラメータを調整
-            self.adjust_lambda(stats)
+            await self.adjust_lambda(stats)
             
             # 調整後の統計情報を取得
             await asyncio.sleep(interval)
             new_stats = {
-                'entropy': self.bb.get('entropy', 0.0),
-                'vdi': self.bb.get('vdi', 0.0),
-                'fcr': self.bb.get('fcr', 0.0),
-                'speed': self.bb.get('speed', 0.0)
+                'entropy': await self.bb.get_param('entropy', 0.0),
+                'vdi': await self.bb.get_param('vdi', 0.0),
+                'fcr': await self.bb.get_param('fcr', 0.0),
+                'speed': await self.bb.get_param('speed', 0.0)
             }
             
             # 次の状態を取得
-            next_state = self._discretize_state(new_stats)
+            next_state = await self._discretize_state(new_stats)
             
             # 報酬を計算
-            reward = self.calculate_reward(new_stats)
+            reward = await self.calculate_reward(new_stats)
             
             # Q値を更新
             self.update_Q(state, action, reward, next_state)

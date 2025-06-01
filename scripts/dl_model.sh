@@ -18,7 +18,7 @@ echo "モデル $MODEL_NAME をダウンロードしています..."
 if [ "$MODEL_NAME" == "gemma3:1b" ]; then
   # Gemma 3 1B モデルのダウンロード
   python -m pip install -q huggingface_hub
-  python -c "from huggingface_hub import snapshot_download; snapshot_download('google/gemma-3-1b', local_dir='$OUTPUT_DIR/gemma3-1b')"
+  python -c "from huggingface_hub import snapshot_download; snapshot_download('google/gemma-3-1b-it-qat-q4_0-gguf', local_dir='$OUTPUT_DIR/gemma3-1b')"
   echo "モデルを $OUTPUT_DIR/gemma3-1b に保存しました"
 elif [ "$MODEL_NAME" == "gpt2" ]; then
   # GPT-2 モデルのダウンロード
