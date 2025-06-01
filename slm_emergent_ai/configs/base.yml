@@ -1,0 +1,55 @@
+"""
+基本設定ファイル - SLM Emergent AIの基本設定
+
+システムの基本設定を定義するYAMLファイル。
+"""
+
+# SLM Emergent AI 基本設定
+model:
+  path: "gemma3:1b"  # モデルパス
+  quantize: "q4"     # 量子化レベル (q4, q8, etc.)
+
+agent:
+  n: 3               # エージェント数
+  max_turns: 10      # 最大ターン数
+  roles:             # エージェントの役割
+    - "質問者"
+    - "回答者"
+    - "批評者"
+
+lambda:
+  a: 0.3             # 整列ルールの重み
+  c: 0.3             # 結合ルールの重み
+  s: 0.1             # 分離ルールの重み
+
+memory:
+  mode: "local"      # メモリモード (local or distributed)
+  redis_url: null    # Redis URL (分散モード時のみ)
+
+controller:
+  target_H: 5.0      # 目標エントロピー
+  Kp: 0.1            # 比例ゲイン
+  Ki: 0.01           # 積分ゲイン
+  Kd: 0.05           # 微分ゲイン
+
+metrics:
+  port: 7861         # メトリクスサーバーポート
+
+ui:
+  enabled: true      # UIの有効化
+  port: 7860         # UIポート
+
+rag:
+  enabled: false     # RAGの有効化
+  backend: "chroma"  # バックエンド (chroma or elastic)
+  config:
+    persist_directory: "./chroma_db"  # ChromaDBの永続化ディレクトリ
+
+runtime:
+  threads: 6         # スレッド数
+
+prompts:
+  initial:           # 初期プロンプト
+    - "こんにちは、私は質問者です。今日のトピックについて議論しましょう。"
+    - "こんにちは、私は回答者です。どのようなご質問でもお答えします。"
+    - "こんにちは、私は批評者です。議論の質を高めるためにコメントします。"

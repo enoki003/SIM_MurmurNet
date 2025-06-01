@@ -1,0 +1,55 @@
+"""
+Grid設定ファイル - パラメータスイープ用設定
+
+hydraを使用したパラメータスイープ実験用の設定ファイル。
+λパラメータやエージェント数などを変化させて実験を行う。
+"""
+
+# SLM Emergent AI グリッド探索設定
+defaults:
+  - base
+
+# hydra設定
+hydra:
+  sweeper:
+    params:
+      agent.n: 3,5,10
+      lambda.a: 0.1,0.3,0.5
+      lambda.c: 0.1,0.3,0.5
+      lambda.s: 0.05,0.1,0.2
+      controller.target_H: 4.0,5.0,6.0
+
+# スイープ設定
+sweep:
+  # λパラメータスイープ
+  λ:
+    a: [0.1, 0.2, 0.3, 0.4, 0.5]
+    c: [0.1, 0.2, 0.3, 0.4, 0.5]
+    s: [0.05, 0.1, 0.15, 0.2]
+  
+  # エージェント数スイープ
+  agent:
+    n: [1, 3, 5, 10, 20, 30]
+  
+  # 目標エントロピースイープ
+  target_H: [3.0, 4.0, 5.0, 6.0, 7.0]
+  
+  # PIDゲインスイープ
+  pid:
+    Kp: [0.05, 0.1, 0.2]
+    Ki: [0.005, 0.01, 0.02]
+    Kd: [0.02, 0.05, 0.1]
+  
+  # 並列実行数
+  N: 4
+
+# 出力設定
+output:
+  dir: "./sweep_results"
+  format: "csv"
+  metrics: ["entropy", "vdi", "fcr", "speed"]
+
+# ロギング設定
+logging:
+  level: "INFO"
+  file: "sweep.log"
