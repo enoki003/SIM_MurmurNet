@@ -639,8 +639,8 @@ class Dashboard:
         """BlackBoardの情報を取得"""
         try:
             if self.bb:
-                # BlackBoardから最新のメッセージを取得
-                messages = await self.bb.pull(k=50)  # 最新50件を取得
+                # BlackBoardから最新のメッセージを辞書形式で取得
+                messages = await self.bb.pull_messages_raw(k=50)  # 最新50件を取得
                 
                 # メッセージを整形
                 formatted_messages = []

@@ -1,12 +1,9 @@
-"""
-基本設定ファイル - SLM Emergent AIの基本設定
-
-システムの基本設定を定義するYAMLファイル。
-"""
+# 基本設定ファイル - SLM Emergent AIの基本設定
+# システムの基本設定を定義するYAMLファイル。
 
 # SLM Emergent AI 基本設定
 model:
-  path: "gemma3:1b"  # モデルパス
+  path: "scripts/models/gemma3-1b/gemma-3-1b-it-q4_0.gguf"  # モデルパス
   quantize: "q4"     # 量子化レベル (q4, q8, etc.)
 
 agent:

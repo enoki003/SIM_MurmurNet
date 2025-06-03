@@ -89,12 +89,41 @@ class BlackBoard:
         
         Returns:
         --------
-        メッセージのリスト
+        メッセージのリスト（文字列形式）
+        """
+        try:
+            raw_messages = self.backend.pull_messages(k)
+            text_messages = []
+            
+            for msg in raw_messages:
+                if isinstance(msg, dict):
+                    # 辞書の場合は 'text' フィールドを抽出
+                    text_messages.append(str(msg.get('text', '')))
+                else:
+                    # 文字列の場合はそのまま使用
+                    text_messages.append(str(msg))
+            
+            return text_messages
+        except Exception as e:
+            print(f"Error pulling from BlackBoard: {e}")
+            return []
+    
+    async def pull_messages_raw(self, k: int = 16) -> List[Dict[str, Any]]:
+        """
+        最新のk件のメッセージを辞書形式で取得（ダッシュボード用）
+        
+        Parameters:
+        -----------
+        k: 取得するメッセージ数
+        
+        Returns:
+        --------
+        メッセージの辞書リスト
         """
         try:
             return self.backend.pull_messages(k)
         except Exception as e:
-            print(f"Error pulling from BlackBoard: {e}")
+            print(f"Error pulling raw messages from BlackBoard: {e}")
             return []
     
     async def _update_summary(self, method: str = "minilm", window: int = 64):
@@ -107,7 +136,7 @@ class BlackBoard:
         window: 要約対象の最新メッセージ数
         """
         try:
-            # 最新のwindow件のメッセージを取得
+            # 最新のwindow件のメッセージを取得（文字列のリスト）
             messages = await self.pull(window)
             if not messages:
                 return
@@ -227,13 +256,23 @@ class BlackBoard:
                 return summary_info["summary"]
             
             # サマリーがない場合は、最新のメッセージから簡易的に生成
-            messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
+            raw_messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
             
-            if not messages:
+            if not raw_messages:
                 return ""
             
+            # メッセージを文字列形式に変換
+            text_messages = []
+            for msg in raw_messages:
+                if isinstance(msg, dict):
+                    # 辞書の場合は 'text' フィールドを抽出
+                    text_messages.append(str(msg.get('text', '')))
+                else:
+                    # 文字列の場合はそのまま使用
+                    text_messages.append(str(msg))
+            
             # 簡易的な要約（実際の実装ではより高度な要約技術を使用）
-            words = " ".join(messages).split()
+            words = " ".join(text_messages).split()
             if len(words) > 30:
                 summary = " ".join(words[:30]) + "..."
             else:

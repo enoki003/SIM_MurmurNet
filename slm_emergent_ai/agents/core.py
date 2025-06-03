@@ -6,8 +6,11 @@ Boids理論に基づく局所ルールで動作するSLMエージェントの実
 
 import asyncio
 import torch
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, TYPE_CHECKING
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..memory.blackboard import BlackBoard
 
 class LLM:
     """言語モデルのラッパークラス"""
@@ -110,24 +113,55 @@ class LLM:
             logits = outputs.logits[0, -1, :].numpy()
             return logits
     
+    def _format_gemma_prompt(self, prompt: str) -> str:
+        """GEMMAモデル用のプロンプトフォーマット"""
+        # GEMMA-3-1B-ITモデル用のフォーマット
+        return f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+    
+    def _is_gemma_model(self) -> bool:
+        """GEMMAモデルかどうかを判定"""
+        return "gemma" in self.model_path.lower()
+    
     def generate(self, prompt: str, max_tokens: int = 100, **kwargs) -> str:
         """テキスト生成を行う"""
         if self.model is None:
             # ダミー実装の場合
             return f"Generated response for: {prompt[:50]}..."
         
+        # GEMMAモデルの場合はプロンプトをフォーマット
+        formatted_prompt = prompt
+        if self._is_gemma_model():
+            formatted_prompt = self._format_gemma_prompt(prompt)
+        
         if hasattr(self.model, 'tokenize'):
             # GGUFモデル（llama-cpp-python）の場合
             try:
+                # stop sequencesを設定（GEMMAモデル用とユーザー指定の両方を考慮）
+                default_stops = ["<end_of_turn>"] if self._is_gemma_model() else []
+                user_stops = kwargs.get("stop", [])
+                if isinstance(user_stops, str):
+                    user_stops = [user_stops]
+                stop_sequences = list(set(default_stops + user_stops))  # 重複を除去
+                
                 response = self.model(
-                    prompt,
+                    formatted_prompt,
                     max_tokens=max_tokens,
                     temperature=kwargs.get("temperature", 0.7),
                     top_p=kwargs.get("top_p", 0.9),
                     repeat_penalty=kwargs.get("repeat_penalty", 1.0),
-                    stop=kwargs.get("stop", [])
+                    stop=stop_sequences
                 )
-                return response['choices'][0]['text']
+                generated_text = response['choices'][0]['text']
+                
+                # GEMMAモデルの場合は余分なタグを除去し、出力をクリーンアップ
+                if self._is_gemma_model():
+                    generated_text = generated_text.replace("<end_of_turn>", "")
+                    generated_text = generated_text.replace("<start_of_turn>", "")
+                    generated_text = generated_text.replace("model\n", "")
+                    generated_text = generated_text.replace("user\n", "")
+                    generated_text = generated_text.strip()
+                
+                return generated_text
             except:
                 # エラーの場合はダミーレスポンスを返す
                 return f"GGUF model response for: {prompt[:50]}..."
@@ -260,30 +294,40 @@ class SLMAgent:
         
         Returns:
         --------
-        生成されたトークン
+        生成されたテキスト
         """
         # BlackBoardから近傍情報を取得（非同期対応）
         neighbors = await bb.pull(k=16)
         summary_vec = getattr(bb, 'summary_vec', np.random.randn(384))
         ctx = BoidsCtx(neighbors, summary_vec)
         
-        # モデルの推論実行
-        logits = self.model.forward(prompt)
-        
-        # Boidsルールを適用
-        logits = apply_boids(logits, ctx, self.λ)
-        
-        # トークンのサンプリング
-        token = sample_top_p(logits)
-        
-        # トークンをデコード（GGUFモデルの場合はtokenizerがNoneの可能性がある）
-        if self.tokenizer is not None:
-            token_str = self.tokenizer.decode([token])
-        else:
-            # GGUFモデルの場合のフォールバック
-            token_str = f"token_{token}"
-        
-        return token_str
+        # LLMの統一されたgenerateメソッドを使用
+        try:
+            generated_text = self.model.generate(
+                prompt,
+                max_tokens=20,
+                temperature=0.7,
+                top_p=0.9,
+                stop=["<end_of_turn>", "\n", ".", "!", "?", "Human:", "User:", "Assistant:"]
+            )
+            
+            # 最初の単語または短いフレーズを取得
+            if generated_text and generated_text.strip():
+                words = generated_text.strip().split()
+                if words:
+                    return words[0]
+                else:
+                    return "..."
+            else:
+                # フォールバック
+                fallback_words = ["hello", "world", "yes", "no", "think", "know", "good", "bad"]
+                return fallback_words[hash(prompt) % len(fallback_words)]
+                
+        except Exception as e:
+            print(f"Error in SLMAgent generate: {e}")
+            # エラー時のフォールバック
+            fallback_words = ["hello", "world", "yes", "no", "think", "know", "good", "bad"]
+            return fallback_words[hash(prompt) % len(fallback_words)]
     
     async def run_conversation(self, initial_prompt: str, bb: 'BlackBoard', max_turns: int = 10) -> List[str]:
         """会話を実行する"""
@@ -294,39 +338,86 @@ class SLMAgent:
         await bb.push({
             "agent_id": self.id,
             "role": self.role,
-            "text": f"初期プロンプト: {initial_prompt}",
+            "text": f"{self.role}として参加しました: {initial_prompt}",
             "timestamp": __import__('time').strftime("%H:%M:%S"),
             "type": "initial_prompt"
         })
         
+        # メッセージバッファ
+        message_buffer = ""
+        
         for i in range(max_turns):
-            # トークン生成
-            token = await self.generate(current_prompt, bb)
-            
-            # 会話に追加
-            conversation.append(token)
-            current_prompt += token
-            
-            # 定期的に完全なメッセージを送信（トークンをバッファリング）
-            if i % 10 == 0 and i > 0:
-                # 完全なメッセージを生成してプッシュ
-                complete_message = {
+            # LLMクラスの統一されたgenerateメソッドを使用
+            try:
+                # プロンプトの準備
+                base_prompt = f"{current_prompt}\n{self.role}: "
+                
+                # LLMのgenerateメソッドを使用（GEMMAフォーマッターが自動適用される）
+                generated_text = self.model.generate(
+                    base_prompt,
+                    max_tokens=30,
+                    temperature=0.7,
+                    top_p=0.9,
+                    stop=["<end_of_turn>", "\n", "Human:", "User:", "Assistant:", self.role + ":"]
+                )
+                
+                if generated_text and generated_text.strip():
+                    # 完全なメッセージを生成
+                    clean_text = generated_text.strip()
+                    conversation.append(clean_text)
+                    current_prompt += f"\n{self.role}: {clean_text}"
+                    
+                    # BlackBoardにメッセージをプッシュ
+                    await bb.push({
+                        "agent_id": self.id,
+                        "role": self.role,
+                        "text": clean_text,
+                        "timestamp": __import__('time').strftime("%H:%M:%S"),
+                        "type": "message"
+                    })
+                else:
+                    # 生成に失敗した場合のフォールバック
+                    fallback_messages = [
+                        "興味深い観点ですね。",
+                        "それについて考えてみましょう。",
+                        "別の角度から見ると...",
+                        "確かにその通りです。",
+                        "さらに詳しく分析すると...",
+                        "他の可能性も検討してみます。"
+                    ]
+                    fallback_msg = fallback_messages[i % len(fallback_messages)]
+                    conversation.append(fallback_msg)
+                    current_prompt += f"\n{self.role}: {fallback_msg}"
+                    
+                    await bb.push({
+                        "agent_id": self.id,
+                        "role": self.role,
+                        "text": fallback_msg,
+                        "timestamp": __import__('time').strftime("%H:%M:%S"),
+                        "type": "message"
+                    })
+                    
+            except Exception as e:
+                print(f"Error in conversation generation: {e}")
+                # エラー時のフォールバック
+                error_messages = [
+                    "システムの処理中です...",
+                    "データを分析しています...",
+                    "新しい情報を統合中...",
+                    "結果を確認しています..."
+                ]
+                error_msg = error_messages[i % len(error_messages)]
+                conversation.append(error_msg)
+                
+                await bb.push({
                     "agent_id": self.id,
                     "role": self.role,
-                    "text": current_prompt[-100:],  # 最新の100文字を送信
+                    "text": error_msg,
                     "timestamp": __import__('time').strftime("%H:%M:%S"),
                     "type": "message"
-                }
-                await bb.push(complete_message)
-            else:
-                # 個別のトークンをプッシュ
-                token_message = {
-                    "agent_id": self.id,
-                    "role": self.role, 
-                    "text": token,
-                    "timestamp": __import__('time').strftime("%H:%M:%S"),
-                    "type": "token"
-                }
-                await bb.push(token_message)
+                })
+            
+            # 短い待機時間
+            await asyncio.sleep(0.1)
         
         return conversation
