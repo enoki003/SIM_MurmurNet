@@ -120,15 +120,35 @@ async def run_simulation(config: Dict[str, Any]):
     agent_tasks = []
     for i, agent in enumerate(agents):
         prompt = initial_prompts[i % len(initial_prompts)]
-        task = asyncio.create_task(agent.run_conversation(prompt, bb, max_turns=config.get("agent", {}).get("max_turns", 10)))
+        # max_turns を非常に大きな値に設定して、実質的に時間制限なしにする
+        task = asyncio.create_task(agent.run_conversation(prompt, bb, max_turns=sys.maxsize)) # Pythonの整数型の最大値
         agent_tasks.append(task)
     
-    # すべてのエージェントタスクが完了するのを待つ
-    await asyncio.gather(*agent_tasks)
-    
-    # コントローラーを停止
-    controller_task.cancel()
-    
+    try:
+        # すべてのエージェントタスクが完了するのを待つ
+        await asyncio.gather(*agent_tasks)
+    except KeyboardInterrupt:
+        print("\\nCtrl+Cが押されました。シミュレーションを安全に停止します...")
+    finally:
+        # コントローラーを停止
+        if controller_task and not controller_task.done():
+            controller_task.cancel()
+            try:
+                await controller_task
+            except asyncio.CancelledError:
+                print("コントローラータスクがキャンセルされました。")
+        
+        # エージェントタスクもキャンセル (必要に応じて)
+        for task in agent_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass # エージェントタスクのキャンセルは想定内
+        
+        print("クリーンアップ完了。")
+
     print("Simulation completed!")
 
 
@@ -145,7 +165,13 @@ def main():
     args = parser.parse_args()
     
     # 設定ファイルの読み込み
-    config_path = os.path.join(os.path.dirname(__file__), "..", args.config)
+    if os.path.isabs(args.config):
+        config_path = args.config
+    else:
+        # 相対パスの場合、slm_emergent_aiパッケージディレクトリからの相対パスとして扱う
+        package_dir = os.path.dirname(__file__)
+        config_path = os.path.join(package_dir, args.config)
+    
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     

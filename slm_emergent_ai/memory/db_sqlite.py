@@ -74,7 +74,7 @@ class SQLiteBackend:
         if self.conn:
             self.conn.close()
     
-    def push_message(self, agent_id: int, text: str) -> bool:
+    def push_message(self, agent_id: int, text: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         メッセージをデータベースに追加
         
@@ -82,6 +82,7 @@ class SQLiteBackend:
         -----------
         agent_id: エージェントID
         text: メッセージテキスト
+        metadata: 追加のメタデータ（辞書型）
         
         Returns:
         --------
@@ -90,17 +91,38 @@ class SQLiteBackend:
         try:
             timestamp = time.time()
             cursor = self.conn.cursor()
+            
+            # メタデータをJSONシリアライズするための列を追加
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS messages_ex (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER,
+                text TEXT,
+                timestamp REAL,
+                metadata TEXT
+            )
+            """)
+            
+            # 既存のテーブルを維持しつつ、新しいテーブルにも書き込む
             cursor.execute(
                 "INSERT INTO messages (agent_id, text, timestamp) VALUES (?, ?, ?)",
                 (agent_id, text, timestamp)
             )
+            
+            # メタデータ付きでメッセージを追加
+            meta_str = json.dumps(metadata) if metadata else "{}"
+            cursor.execute(
+                "INSERT INTO messages_ex (agent_id, text, timestamp, metadata) VALUES (?, ?, ?, ?)",
+                (agent_id, text, timestamp, meta_str)
+            )
+            
             self.conn.commit()
             return True
         except Exception as e:
             print(f"Error pushing message to SQLite: {e}")
             return False
     
-    def pull_messages(self, k: int = 16) -> List[str]:
+    def pull_messages(self, k: int = 16) -> List[Dict[str, Any]]:
         """
         最新のk件のメッセージを取得
         
@@ -110,15 +132,62 @@ class SQLiteBackend:
         
         Returns:
         --------
-        メッセージのリスト
+        メッセージの辞書リスト
         """
         try:
             cursor = self.conn.cursor()
+            
+            # 拡張テーブルが存在する場合はそこから取得
+            try:
+                cursor.execute(
+                    "SELECT agent_id, text, timestamp, metadata FROM messages_ex ORDER BY timestamp DESC LIMIT ?",
+                    (k,)
+                )
+                rows = cursor.fetchall()
+                if rows and len(rows) > 0:
+                    messages = []
+                    for row in rows:
+                        agent_id, text, timestamp, metadata_str = row
+                        try:
+                            metadata = json.loads(metadata_str) if metadata_str else {}
+                            # メタデータから必要な情報を取得
+                            message = {
+                                "agent_id": metadata.get("agent_id", agent_id),
+                                "role": metadata.get("role", f"Agent_{agent_id}"),
+                                "text": text,
+                                "timestamp": metadata.get("timestamp", time.strftime("%H:%M:%S", time.localtime(timestamp))),
+                                "type": metadata.get("type", "message")
+                            }
+                            messages.append(message)
+                        except json.JSONDecodeError:
+                            # メタデータが無効な場合は基本的な情報のみを含める
+                            messages.append({
+                                "agent_id": agent_id,
+                                "text": text,
+                                "timestamp": time.strftime("%H:%M:%S", time.localtime(timestamp))
+                            })
+                    return messages
+            except (sqlite3.OperationalError, Exception) as e:
+                # メッセージ拡張テーブルが存在しない場合は無視
+                pass
+                
+            # 従来のテーブルからデータを取得
             cursor.execute(
-                "SELECT text FROM messages ORDER BY timestamp DESC LIMIT ?",
+                "SELECT agent_id, text, timestamp FROM messages ORDER BY timestamp DESC LIMIT ?",
                 (k,)
             )
-            return [row[0] for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+            messages = []
+            for row in rows:
+                agent_id, text, timestamp = row
+                messages.append({
+                    "agent_id": agent_id,
+                    "role": f"Agent_{agent_id}",
+                    "text": text,
+                    "timestamp": time.strftime("%H:%M:%S", time.localtime(timestamp))
+                })
+            return messages
+            
         except Exception as e:
             print(f"Error pulling messages from SQLite: {e}")
             return []

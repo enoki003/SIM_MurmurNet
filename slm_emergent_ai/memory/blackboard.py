@@ -8,7 +8,7 @@ BlackBoardの拡張 - トピックサマリー取得メソッドの追加
 import asyncio
 import json
 import time
-from typing import Dict, List, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from .db_sqlite import SQLiteBackend
@@ -46,21 +46,30 @@ class BlackBoard:
             # 分散モード: RedisBackendを使用
             self.backend = RedisBackend(self.redis_url)
     
-    async def push(self, agent_id: int, text: str) -> bool:
+    async def push(self, message: Union[Dict[str, Any], int, str], text: Optional[str] = None) -> bool:
         """
         メッセージをブラックボードに追加
         
         Parameters:
         -----------
-        agent_id: エージェントID
-        text: メッセージテキスト
+        message: メッセージデータ（辞書）または従来のagent_id
+        text: メッセージテキスト（messageが辞書でない場合に使用）
         
         Returns:
         --------
         成功したかどうか
         """
         try:
-            result = self.backend.push_message(agent_id, text)
+            if isinstance(message, dict):
+                # 新しいフォーマット：辞書型のメッセージ
+                agent_id = message.get("agent_id", 0)
+                msg_text = message.get("text", "")
+                result = self.backend.push_message(agent_id, msg_text, message)
+            else:
+                # 従来のフォーマット：agent_id + text
+                agent_id = message
+                msg_text = text or ""
+                result = self.backend.push_message(agent_id, msg_text)
             
             # 非同期で要約を更新
             asyncio.create_task(self._update_summary())

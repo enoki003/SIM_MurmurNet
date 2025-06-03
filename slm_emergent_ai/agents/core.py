@@ -290,7 +290,16 @@ class SLMAgent:
         conversation = [initial_prompt]
         current_prompt = initial_prompt
         
-        for _ in range(max_turns):
+        # 初期メッセージをBlackBoardにプッシュ
+        await bb.push({
+            "agent_id": self.id,
+            "role": self.role,
+            "text": f"初期プロンプト: {initial_prompt}",
+            "timestamp": __import__('time').strftime("%H:%M:%S"),
+            "type": "initial_prompt"
+        })
+        
+        for i in range(max_turns):
             # トークン生成
             token = await self.generate(current_prompt, bb)
             
@@ -298,7 +307,26 @@ class SLMAgent:
             conversation.append(token)
             current_prompt += token
             
-            # BlackBoardに情報をプッシュ
-            await bb.push(self.id, token)
+            # 定期的に完全なメッセージを送信（トークンをバッファリング）
+            if i % 10 == 0 and i > 0:
+                # 完全なメッセージを生成してプッシュ
+                complete_message = {
+                    "agent_id": self.id,
+                    "role": self.role,
+                    "text": current_prompt[-100:],  # 最新の100文字を送信
+                    "timestamp": __import__('time').strftime("%H:%M:%S"),
+                    "type": "message"
+                }
+                await bb.push(complete_message)
+            else:
+                # 個別のトークンをプッシュ
+                token_message = {
+                    "agent_id": self.id,
+                    "role": self.role, 
+                    "text": token,
+                    "timestamp": __import__('time').strftime("%H:%M:%S"),
+                    "type": "token"
+                }
+                await bb.push(token_message)
         
         return conversation
