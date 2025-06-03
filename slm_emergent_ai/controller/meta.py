@@ -87,7 +87,7 @@ class MetaController:
             λ_s_new = λ_s
         
         # Q学習による調整（状態を離散化）
-        state = await self._discretize_state(stats)
+        state = self._discretize_state(stats)
         action = self._select_action(state)
         
         # 行動に基づいてλを微調整

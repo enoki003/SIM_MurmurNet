@@ -11,4 +11,3 @@ chromadb>=0.4.0
 elasticsearch>=8.0.0
 tqdm>=4.65.0
 matplotlib>=3.7.0
-accelerate

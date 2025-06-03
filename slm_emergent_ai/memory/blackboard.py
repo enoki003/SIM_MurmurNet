@@ -1,8 +1,8 @@
 """
-BlackBoard - 共有メモリモジュール
+BlackBoardの拡張 - トピックサマリー取得メソッドの追加
 
-エージェント間の情報共有と調整を行うブラックボードシステム。
-ローカルではSQLiteBackend、分散時はRedisBackendをバックエンドに使用。
+プロンプトエンジニアリング方式のBoids制御に必要な
+トピックサマリー取得メソッドを追加
 """
 
 import asyncio
@@ -201,3 +201,37 @@ class BlackBoard:
         except Exception as e:
             print(f"Error clearing BlackBoard: {e}")
             return False
+    
+    def get_topic_summary(self) -> str:
+        """
+        現在のトピックサマリーを取得（プロンプトエンジニアリング用）
+        
+        Returns:
+        --------
+        トピックサマリー文字列
+        """
+        try:
+            # 最新のサマリー情報を取得
+            summary_info = self.backend.get_latest_summary()
+            
+            if summary_info and "summary" in summary_info:
+                return summary_info["summary"]
+            
+            # サマリーがない場合は、最新のメッセージから簡易的に生成
+            messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
+            
+            if not messages:
+                return ""
+            
+            # 簡易的な要約（実際の実装ではより高度な要約技術を使用）
+            words = " ".join(messages).split()
+            if len(words) > 30:
+                summary = " ".join(words[:30]) + "..."
+            else:
+                summary = " ".join(words)
+            
+            return summary
+            
+        except Exception as e:
+            print(f"Error getting topic summary: {e}")
+            return ""

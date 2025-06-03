@@ -86,38 +86,38 @@ slm_emergent_ai/
     ├── run_sim.py
     ├── configs/
     │   ├── base.yml
-    │   ├── grid.yml    # 実装予定
-    │   └── prod.yml    # 実装予定
+    │   ├── grid.yml  
+    │   └── prod.yml 
     ├── models/
     │   ├── loader.py
-    │   └── quantizer.py # 実装予定
+    │   └── quantizer.py
     ├── agents/
     │   ├── core.py
     │   ├── rag.py
-    │   └── memory_agent.py # 実装予定
+    │   └── memory_agent.py
     ├── boids/
     │   ├── rules.py
     │   └── processor.py
     ├── memory/
     │   ├── blackboard.py
-    │   ├── db_sqlite.py # 実装予定
-    │   └── db_redis.py  # 実装予定
+    │   ├── db_sqlite.py 
+    │   └── db_redis.py 
     ├── eval/
     │   ├── metrics.py
-    │   ├── plot.py     # 実装予定
-    │   └── benchmark.py # 実装予定
+    │   ├── plot.py     
+    │   └── benchmark.py 
     ├── controller/
     │   ├── meta.py
     │   └── pid.py
     ├── ui/
     │   ├── dashboard.py
-    │   └── schema.py   # 実装予定
+    │   └── schema.py   
     └── tests/
-        ├── test_boids.py # 実装予定
-        ├── test_blackboard.py # 実装予定
-        ├── test_metrics.py # 実装予定
+        ├── test_boids.py 
+        ├── test_blackboard.py 
+        ├── test_metrics.py 
         └── perf/
-            └── bench_10agents.py # 実装予定
+            └── bench_10agents.py 
 ```
 
 ## 主要コンポーネント
