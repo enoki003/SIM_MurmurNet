@@ -3,8 +3,9 @@
 
 # SLM Emergent AI 基本設定
 model:
-  path: "scripts/models/gemma3-1b/gemma-3-1b-it-q4_0.gguf"  # モデルパス
+  path: "C:/Users/admin/Desktop/slm/SIM_MurmurNet/scripts/models/gemma-3-1b-it-q4_0.gguf"  # モデルパス
   quantize: "q4"     # 量子化レベル (q4, q8, etc.)
+  n_ctx: 4096        # コンテキスト長（トークン数）
 
 agent:
   n: 3               # エージェント数
@@ -45,8 +46,12 @@ rag:
 runtime:
   threads: 6         # スレッド数
 
+evaluation:
+  enabled: true      # 評価指標の有効化
+  freq: 3            # 評価頻度（ステップごと）
+
 prompts:
   initial:           # 初期プロンプト
-    - "こんにちは、私は質問者です。今日のトピックについて議論しましょう。"
-    - "こんにちは、私は回答者です。どのようなご質問でもお答えします。"
-    - "こんにちは、私は批評者です。議論の質を高めるためにコメントします。"
+    - "あなたは質問者です。"
+    - "あなたは回答者です"
+    - "あなたは批判者です"

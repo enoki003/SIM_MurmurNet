@@ -37,241 +37,133 @@ class BoidsPromptProcessor:
         self.seed = seed
         if seed is not None:
             random.seed(seed)
+
     async def process_prompt(self, base_prompt: str, agent_id: int, role: str, k: int = 16) -> str:
         """
         Boidsルールに基づいてプロンプトを加工
+        """
+        # BlackBoardから近傍情報を取得
+        try:
+            messages = await self.bb.pull_messages_raw(k)
+            print(f"[DEBUG] BoidsPromptProcessor: Agent {agent_id} ({role}) received {len(messages)} raw messages")
+        except AttributeError:
+            messages = await self.bb.pull(k)
+            print(f"[DEBUG] BoidsPromptProcessor: Agent {agent_id} ({role}) received {len(messages)} messages")
         
-        Parameters:
-        -----------
-        base_prompt: 元のプロンプト
-        agent_id: エージェントID
-        role: エージェントの役割
-        k: 取得する近傍メッセージ数
-        
-        Returns:
-        --------
-        Boidsルールを適用した後のプロンプト
-        """        # BlackBoardから近傍情報を取得
-        messages = await self.bb.pull(k)
-        
-        print(f"[DEBUG] BoidsPromptProcessor: Agent {agent_id} ({role}) received {len(messages)} messages from BlackBoard")
-        
-        # メッセージのテキスト部分を抽出（messagesは既に文字列のリスト）
-        message_texts = [str(msg) for msg in messages if msg and str(msg).strip()]
-        print(f"[DEBUG] Extracted {len(message_texts)} message texts: {message_texts[:3] if message_texts else 'None'}")
-        
-        # 各ルールの適用確率を計算（λ値に基づく）
-        # 分離ルールの影響を意図的に下げる
-        rule_weights = {
-            'alignment': self.λ.get('λ_a', 0.3) * 1.5,  # 整列ルールを強調
-            'cohesion': self.λ.get('λ_c', 0.3) * 1.5,   # 結合ルールを強調
-            'separation': self.λ.get('λ_s', 0.1) * 0.5  # 分離ルールを弱める
-        }
-        
-        # 合計が1になるように正規化
-        total_weight = sum(rule_weights.values())
-        rule_probs = {k: v/total_weight for k, v in rule_weights.items()}
-        
-        # ルールの選択（確率的に1つのルールを強調）
-        rule_choices = list(rule_probs.keys())
-        rule_values = list(rule_probs.values())
+        # メッセージのテキスト部分を抽出
+        speaker_info = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                text = msg.get('text', str(msg))
+                agent_name = msg.get('agent_name', msg.get('role', 'Unknown'))
+                speaker_info.append(f"{agent_name}: {text}")
+            elif isinstance(msg, str):
+                speaker_info.append(f"発言者不明: {msg}")
+            else:
+                speaker_info.append(f"発言者不明: {str(msg)}")
         
         # エージェントIDに基づいて異なるルールを優先（多様性のため）
-        # エージェント1: 整列、エージェント2: 結合、エージェント3: 分離
         if agent_id % 3 == 1:
             primary_rule = 'alignment'  # 整列を優先
         elif agent_id % 3 == 2:
             primary_rule = 'cohesion'   # 結合を優先
         else:
             primary_rule = 'separation' # 分離を優先
-          # 整列ルール（Alignment）のプロンプト部分を構築
-        alignment_prompt = await self._build_alignment_prompt(message_texts)
         
-        # 結合ルール（Cohesion）のプロンプト部分を構築
-        cohesion_prompt = await self._build_cohesion_prompt()
-        
-        # 分離ルール（Separation）のプロンプト部分を構築
-        separation_prompt = self._build_separation_prompt()
+        # 各ルールのプロンプト部分を構築
+        alignment_prompt = self._build_alignment_prompt(speaker_info)
+        cohesion_prompt = self._build_cohesion_prompt(speaker_info)
+        separation_prompt = self._build_separation_prompt(role)
         
         # 主要ルールを強調したプロンプト構築
         boids_instructions = []
         
         if primary_rule == 'alignment':
             boids_instructions.append(f"【整列ルール】{alignment_prompt}")
-            if rule_probs['cohesion'] > 0.2:
-                boids_instructions.append(cohesion_prompt)
-            if rule_probs['separation'] > 0.2:
-                boids_instructions.append(separation_prompt)
+            boids_instructions.append(f"【結合ルール】{cohesion_prompt}")
         elif primary_rule == 'cohesion':
             boids_instructions.append(f"【結合ルール】{cohesion_prompt}")
-            if rule_probs['alignment'] > 0.2:
-                boids_instructions.append(alignment_prompt)
-            if rule_probs['separation'] > 0.2:
-                boids_instructions.append(separation_prompt)
+            boids_instructions.append(f"【整列ルール】{alignment_prompt}")
         else:  # separation
             boids_instructions.append(f"【分離ルール】{separation_prompt}")
-            if rule_probs['alignment'] > 0.2:
-                boids_instructions.append(alignment_prompt)
-            if rule_probs['cohesion'] > 0.2:
-                boids_instructions.append(cohesion_prompt)
-          # 役割に基づく追加の指示
-        role_specific_instructions = {
-            "質問者": "新しい疑問を投げかけ、議論を深める質問をしてください。",
-            "回答者": "具体的で建設的な解決策や回答を提供してください。",
-            "批評者": "客観的な視点で分析し、改善点や問題点を指摘してください。",
-            "批判者": "客観的な視点で分析し、改善点や問題点を指摘してください。"
-        }
+            boids_instructions.append(f"【整列ルール】{alignment_prompt}")
         
-        role_instruction = role_specific_instructions.get(role, "建設的な貢献をしてください。")
+        # 役割固有の指示を追加
+        role_instruction = self._build_role_instruction(role)
         
         # 最終的なプロンプトを構築
-        final_prompt = f"""
+        enhanced_prompt = f"""{role_instruction}
+
+{chr(10).join(boids_instructions)}
+
 {base_prompt}
 
-あなたはエージェント{agent_id}で、役割は「{role}」です。
-{role_instruction}
+前述の指示に基づいて、あなたの役割({role})として自然で建設的な応答をしてください。"""
+        
+        return enhanced_prompt
 
-以下の指示に従って回答してください：
+    def _build_alignment_prompt(self, speaker_info: List[str]) -> str:
+        """整列ルール（Alignment）のプロンプトを構築"""
+        if not speaker_info:
+            return "最近の議論の流れを考慮して発言してください。"
+        
+        recent_messages = speaker_info[-3:] if len(speaker_info) >= 3 else speaker_info
+        prompt = "以下の最近の発言を参考に、議論の流れに沿った応答をしてください：\n"
+        for msg in recent_messages:
+            prompt += f"- {msg}\n"
+        prompt += "上記の発言の方向性や論調を意識して、建設的に議論を続けてください。"
+        return prompt
 
-{' '.join(boids_instructions)}
+    def _build_cohesion_prompt(self, speaker_info: List[str]) -> str:
+        """結合ルール（Cohesion）のプロンプトを構築"""
+        if not speaker_info:
+            return "議論全体の目標に向かって発言してください。"
+        
+        speakers = set()
+        for msg in speaker_info:
+            if ':' in msg:
+                speaker = msg.split(':', 1)[0]
+                speakers.add(speaker)
+        
+        prompt = f"これまでの議論には{len(speakers)}名が参加しており、以下のような流れです：\n"
+        summary_messages = speaker_info[-5:] if len(speaker_info) >= 5 else speaker_info
+        for msg in summary_messages:
+            prompt += f"- {msg}\n"
+        prompt += "議論全体の一貫性を保ち、共通の理解に向けて貢献してください。"
+        return prompt
 
-回答：
-"""
-        
-        return final_prompt
-    
-    async def _build_alignment_prompt(self, messages: List[str]) -> str:
-        """
-        整列ルール（Alignment）のプロンプト部分を構築
-        
-        Parameters:
-        -----------
-        messages: 近傍エージェントのメッセージリスト
-        
-        Returns:
-        --------
-        整列ルールを表現するプロンプト部分
-        """
-        if not messages:
-            return "他のエージェントの発言はまだありません。独自の視点で考えてください。"
-        
-        # 近傍メッセージの要約
-        summary = " ".join(messages[-3:])  # 最新の3つのメッセージを使用
-        
-        # 整列ルールの強度に応じてプロンプトの表現を調整
-        strength = self.λ.get('λ_a', 0.3)
-        
-        alignment_prompts = [
-            f"""
-他のエージェントは次のように述べています：「{summary}」
-これらの意見に強く同調し、同じ方向性で考えを発展させてください。
-他のエージェントの考えを支持し、その延長線上にあるアイデアを提案してください。
-""",
-            f"""
-他のエージェントは次のように述べています：「{summary}」
-これらの意見を参考にして、同様の方向性で考えを述べてください。
-他のエージェントの視点を取り入れ、協調的な意見を述べることが重要です。
-""",
-            f"""
-他のエージェントは次のように述べています：「{summary}」
-これらの意見も考慮しながら、回答を考えてください。
-他のエージェントの考えを尊重し、部分的に取り入れてください。
-"""
-        ]
-        
-        if strength > 0.5:
-            return alignment_prompts[0]
-        elif strength > 0.3:
-            return alignment_prompts[1]
-        else:
-            return alignment_prompts[2]
-    
-    async def _build_cohesion_prompt(self) -> str:
-        """
-        結合ルール（Cohesion）のプロンプト部分を構築
-        
-        Returns:
-        --------
-        結合ルールを表現するプロンプト部分
-        """
-        # BlackBoardからトピックサマリーを取得
-        topic_summary = self.bb.get_topic_summary()
-        
-        # 結合ルールの強度に応じてプロンプトの表現を調整
-        strength = self.λ.get('λ_c', 0.3)
-        
-        if not topic_summary:
-            return "まだ明確なトピックは形成されていません。自由に考えを述べてください。"
-        
-        cohesion_prompts = [
-            f"""
-現在の議論の中心テーマは「{topic_summary}」です。
-このテーマに密接に関連した内容を述べ、議論の一貫性を高めてください。
-中心テーマから外れないよう注意し、議論を収束させる方向で考えてください。
-""",
-            f"""
-現在の議論の中心テーマは「{topic_summary}」です。
-このテーマを念頭に置きながら回答してください。
-議論の中心から大きく逸脱しないよう意識してください。
-""",
-            f"""
-現在の議論の中心テーマは「{topic_summary}」です。
-このテーマも考慮に入れてください。
-可能な範囲でこのテーマに関連する内容に触れてください。
-"""
-        ]
-        
-        if strength > 0.5:
-            return cohesion_prompts[0]
-        elif strength > 0.3:
-            return cohesion_prompts[1]
-        else:
-            return cohesion_prompts[2]
-    
-    def _build_separation_prompt(self) -> str:
-        """
-        分離ルール（Separation）のプロンプト部分を構築
-        
-        Returns:
-        --------
-        分離ルールを表現するプロンプト部分
-        """
-        # 分離ルールの強度に応じてプロンプトの表現を調整
-        strength = self.λ.get('λ_s', 0.1)
-        
-        # 多様性を促す視点のリスト
-        perspectives = [
-            "既存の枠組みを超えた発想で考えてみてください。",
-            "他のエージェントとは明確に異なる視点を提供してください。",
-            "独自の洞察や革新的なアイデアを積極的に提案してください。",
-            "議論に多様性をもたらす対立的な視点を考えてください。",
-            "既存の意見に対する建設的な反論や代替案を提案してください。"
-        ]
-        
-        # ランダムに視点を選択
-        selected_perspective = random.choice(perspectives)
-        
-        separation_prompts = [
-            f"""
-他のエージェントとは明確に異なる独自の視点を強く打ち出してください。
-{selected_perspective}
-議論の多様性を高めることが最も重要です。
-あえて異なる立場から考え、新しい視点を導入してください。
-""",
-            f"""
-他のエージェントとは異なる視点も取り入れてください。
-{selected_perspective}
-議論に新たな視点をもたらすことを意識してください。
-""",
-            f"""
-必要に応じて、{selected_perspective.lower()}
-多様な意見があることを示唆する内容も検討してください。
-"""
-        ]
-        
-        if strength > 0.3:
-            return separation_prompts[0]
-        elif strength > 0.1:
-            return separation_prompts[1]
-        else:
-            return separation_prompts[2]
+    def _build_separation_prompt(self, role: str) -> str:
+        """分離ルール（Separation）のプロンプトを構築"""
+        separation_instructions = {
+            "質問者": "他の参加者とは違う角度から、新しい疑問や問題提起をしてください。",
+            "回答者": "他の発言とは異なる具体的で実用的な解決策を提示してください。",
+            "批評者": "これまでの議論では触れられていない問題点や改善点を指摘してください。",
+            "批判者": "これまでの議論では触れられていない問題点や改善点を指摘してください。",
+        }
+        instruction = separation_instructions.get(role, "あなた独自の視点で、他とは異なる貢献をしてください。")
+        return f"あなたの役割({role})の特性を活かし、{instruction}"
+
+    def _build_role_instruction(self, role: str) -> str:
+        """役割固有の基本指示を構築"""
+        role_instructions = {
+            "質問者": """あなたは好奇心旺盛な質問者です。
+- 議論を深める質問を投げかけてください
+- 「なぜ？」「どのように？」「他には？」といった探求的な姿勢を示してください
+- 新しい視点や角度から問題を捉えてください""",
+            
+            "回答者": """あなたは知識豊富な回答者です。
+- 具体的で実用的な回答や解決策を提供してください
+- 事例や経験に基づいた説明を心がけてください
+- 分かりやすく建設的な情報を提供してください""",
+            
+            "批評者": """あなたは冷静な批評者です。
+- 客観的な視点で議論を分析してください
+- 長所と短所をバランスよく評価してください
+- 改善点や代替案を建設的に提示してください""",
+            
+            "批判者": """あなたは冷静な批評者です。
+- 客観的な視点で議論を分析してください
+- 長所と短所をバランスよく評価してください
+- 改善点や代替案を建設的に提示してください""",
+        }
+        return role_instructions.get(role, "あなたは議論に参加する一員として、建設的な貢献をしてください。")
