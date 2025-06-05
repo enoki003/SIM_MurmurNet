@@ -36,15 +36,29 @@ async def run_simulation(config: Dict[str, Any]):
     # BlackBoardの初期化
     bb_mode = config.get("memory", {}).get("mode", "local")
     redis_url = config.get("memory", {}).get("redis_url", None)
-    bb = BlackBoard(mode=bb_mode, redis_url=redis_url)
-    
-    # モデルの初期化
+    bb = BlackBoard(mode=bb_mode, redis_url=redis_url)    # モデルの初期化
     model_path = config.get("model", {}).get("path", "gemma3:1b")
     threads = config.get("runtime", {}).get("threads", 4)
     quantize = config.get("model", {}).get("quantize", "q4")
+    n_ctx = config.get("model", {}).get("n_ctx", 512)
     
-    print(f"Loading model: {model_path} with {threads} threads, quantization: {quantize}")
-    model = LLM(model_path, threads=threads, quantize=quantize)
+    print(f"Loading model: {model_path} with {threads} threads, quantization: {quantize}, context length: {n_ctx}")
+    
+    try:
+        model = LLM(model_path, threads=threads, quantize=quantize, n_ctx=n_ctx)
+        print("Model loaded successfully!")
+    except FileNotFoundError as e:
+        print(f"ERROR: Model file not found: {e}")
+        print("Please ensure the model file exists at the specified path.")
+        return
+    except ImportError as e:
+        print(f"ERROR: Required library not installed: {e}")
+        print("Please install the required dependencies.")
+        return
+    except Exception as e:
+        print(f"ERROR: Failed to initialize model: {e}")
+        print("Please check your model configuration and try again.")
+        return
     
     # エージェントの初期化
     agent_count = config.get("agent", {}).get("n", 3)
@@ -56,8 +70,7 @@ async def run_simulation(config: Dict[str, Any]):
         "λ_c": config.get("lambda", {}).get("c", 0.3),
         "λ_s": config.get("lambda", {}).get("s", 0.1)
     }
-    
-    # BlackBoardにλパラメータを設定
+      # BlackBoardにλパラメータを設定
     for key, value in lambda_params.items():
         await bb.set_param(key, value)
     
@@ -65,10 +78,13 @@ async def run_simulation(config: Dict[str, Any]):
     await bb.set_param("base_speed", 10.0)
     
     print(f"Initializing {agent_count} agents...")
+    # 役割の事前定義
+    roles = config.get("agent", {}).get("roles", ["質問者", "回答者", "批評者"])
     for i in range(agent_count):
-        role = f"Agent{i+1}"
+        role = roles[i % len(roles)]  # 循環的に役割を割り当て
         agent = SLMAgent(id=i+1, role=role, model=model, tokenizer=model.tokenizer, λ=lambda_params)
         agents.append(agent)
+        print(f"[DEBUG] Agent {i+1} initialized with role: {role}")
     
     # RAGエージェントの初期化（オプション）
     rag_enabled = config.get("rag", {}).get("enabled", False)
@@ -106,15 +122,64 @@ async def run_simulation(config: Dict[str, Any]):
         )
         ui_thread.start()
         print(f"UI dashboard started on port {ui_port}")
-    
-    # シミュレーションの実行
+      # シミュレーションの実行
     print("Starting simulation...")
     
-    # 初期プロンプトの設定
+    # ログとメトリクス収集のための変数
+    simulation_logs = []
+    step_counter = 0
+    
+    # 評価設定
+    eval_enabled = config.get("evaluation", {}).get("enabled", True)
+    eval_freq = config.get("evaluation", {}).get("freq", 5)
+    
+    print(f"[DEBUG] Evaluation enabled: {eval_enabled}, frequency: {eval_freq}")
+      # 初期プロンプトの設定
     initial_prompts = config.get("prompts", {}).get("initial", ["こんにちは、私はAIアシスタントです。"])
     
     # コントローラーを別タスクで実行
     controller_task = asyncio.create_task(controller.run())
+    
+    # メトリクス更新タスクを追加
+    async def metrics_update_loop():
+        """定期的にメトリクスを更新するループ"""
+        nonlocal step_counter, simulation_logs
+        while True:
+            await asyncio.sleep(2)  # 2秒間隔でメトリクス更新
+            step_counter += 1
+              # BlackBoardから最新のメッセージを取得（辞書形式）
+            recent_messages = await bb.pull_messages_raw(k=20)
+            
+            # ログに追加
+            step_log = {
+                'step': step_counter,
+                'timestamp': __import__('time').strftime("%H:%M:%S"),
+                'agent_responses': {msg.get('agent_id', 0): msg.get('text', '') for msg in recent_messages[-3:] if isinstance(msg, dict)},
+                'total_messages': len(recent_messages)
+            }
+            simulation_logs.append(step_log)
+            
+            # 評価指標の計算
+            if eval_enabled and (step_counter % eval_freq == 0):
+                try:                    # メトリクスの計算
+                    current_metrics = {
+                        'step': step_counter,
+                        'total_messages': len(recent_messages),
+                        'unique_agents': len(set(msg.get('agent_id', 0) for msg in recent_messages if isinstance(msg, dict))),
+                        'avg_message_length': sum(len(msg.get('text', '')) for msg in recent_messages[-10:] if isinstance(msg, dict)) / min(10, len(recent_messages)) if recent_messages else 0,
+                        'conversation_diversity': len(set(msg.get('text', '') for msg in recent_messages[-10:] if isinstance(msg, dict))) / min(10, len(recent_messages)) if recent_messages else 0
+                    }
+                    
+                    print(f"[METRICS] Step {step_counter}: {current_metrics}")
+                    
+                    # メトリクストラッカーに記録
+                    metrics_tracker.log_step(current_metrics)
+                    
+                except Exception as e:
+                    print(f"[ERROR] Metrics calculation failed: {e}")
+    
+    # メトリクス更新タスクを開始
+    metrics_task = asyncio.create_task(metrics_update_loop())
     
     # エージェントの実行
     agent_tasks = []
@@ -123,31 +188,24 @@ async def run_simulation(config: Dict[str, Any]):
         # max_turns を非常に大きな値に設定して、実質的に時間制限なしにする
         task = asyncio.create_task(agent.run_conversation(prompt, bb, max_turns=sys.maxsize)) # Pythonの整数型の最大値
         agent_tasks.append(task)
-    
     try:
-        # すべてのエージェントタスクが完了するのを待つ
-        await asyncio.gather(*agent_tasks)
+        # すべてのタスクを並行実行
+        await asyncio.gather(*agent_tasks, metrics_task)
     except KeyboardInterrupt:
         print("\\nCtrl+Cが押されました。シミュレーションを安全に停止します...")
     finally:
-        # コントローラーを停止
-        if controller_task and not controller_task.done():
-            controller_task.cancel()
-            try:
-                await controller_task
-            except asyncio.CancelledError:
-                print("コントローラータスクがキャンセルされました。")
-        
-        # エージェントタスクもキャンセル (必要に応じて)
-        for task in agent_tasks:
-            if not task.done():
+        # すべてのタスクを停止
+        tasks_to_cancel = [controller_task, metrics_task] + agent_tasks
+        for task in tasks_to_cancel:
+            if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass # エージェントタスクのキャンセルは想定内
+                    pass
         
         print("クリーンアップ完了。")
+        print(f"[SUMMARY] Total simulation steps: {step_counter}, Total logs: {len(simulation_logs)}")
 
     print("Simulation completed!")
 
@@ -168,9 +226,13 @@ def main():
     if os.path.isabs(args.config):
         config_path = args.config
     else:
-        # 相対パスの場合、slm_emergent_aiパッケージディレクトリからの相対パスとして扱う
-        package_dir = os.path.dirname(__file__)
-        config_path = os.path.join(package_dir, args.config)
+        # 相対パスの場合、まずslm_emergent_aiディレクトリからの相対パスを試す
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, args.config)
+        
+        # ファイルが存在しない場合は、現在の作業ディレクトリからの相対パスを試す
+        if not os.path.exists(config_path):
+            config_path = os.path.abspath(args.config)
     
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)

@@ -30,13 +30,20 @@ def alignment_rule(logits: np.ndarray, neighbor_vecs: np.ndarray, λ_a: float) -
     norm = np.linalg.norm(mean_dir)
     if norm > 0:
         mean_dir = mean_dir / norm
-    
-    # logitsに反映（埋め込み空間からlogits空間への変換）
-    # テスト用に簡略化した実装 - 実際のモデルでは埋め込み次元とlogits次元が一致する必要はない
+      # logitsに反映（埋め込み空間からlogits空間への変換）
     if mean_dir.shape[0] != logits.shape[0]:
-        # 次元が一致しない場合は、ランダム投影行列を使用して次元を合わせる
-        projection = np.random.randn(mean_dir.shape[0], logits.shape[0])
-        alignment_effect = np.dot(mean_dir, projection)
+        # 次元が一致しない場合は、決定論的な投影を使用
+        # シンプルな線形変換（平均プーリングまたは反復）
+        if mean_dir.shape[0] > logits.shape[0]:
+            # ダウンサンプリング: 平均プーリング
+            pool_size = mean_dir.shape[0] // logits.shape[0]
+            alignment_effect = np.array([
+                np.mean(mean_dir[i*pool_size:(i+1)*pool_size]) 
+                for i in range(logits.shape[0])
+            ])
+        else:
+            # アップサンプリング: 繰り返し
+            alignment_effect = np.tile(mean_dir, (logits.shape[0] // mean_dir.shape[0] + 1))[:logits.shape[0]]
     else:
         alignment_effect = mean_dir
     
@@ -61,13 +68,19 @@ def cohesion_rule(logits: np.ndarray, summary_vec: np.ndarray, λ_c: float) -> n
     """
     if summary_vec is None or np.all(summary_vec == 0):
         return logits
-    
-    # トピック中心との類似度を計算
-    # テスト用に簡略化した実装 - 実際のモデルでは埋め込み次元とlogits次元が一致する必要はない
+      # トピック中心との類似度を計算
     if summary_vec.shape[0] != logits.shape[0]:
-        # 次元が一致しない場合は、ランダム投影行列を使用して次元を合わせる
-        projection = np.random.randn(summary_vec.shape[0], logits.shape[0])
-        cohesion_effect = np.dot(summary_vec, projection)
+        # 次元が一致しない場合は、決定論的な投影を使用
+        if summary_vec.shape[0] > logits.shape[0]:
+            # ダウンサンプリング: 平均プーリング
+            pool_size = summary_vec.shape[0] // logits.shape[0]
+            cohesion_effect = np.array([
+                np.mean(summary_vec[i*pool_size:(i+1)*pool_size]) 
+                for i in range(logits.shape[0])
+            ])
+        else:
+            # アップサンプリング: 繰り返し
+            cohesion_effect = np.tile(summary_vec, (logits.shape[0] // summary_vec.shape[0] + 1))[:logits.shape[0]]
     else:
         cohesion_effect = summary_vec
     
@@ -88,18 +101,23 @@ def separation_rule(logits: np.ndarray, λ_s: float, seed: Optional[int] = None)
     
     Returns:
     --------
-    分離ルールを適用した後のlogits
-    """
-    if seed is not None:
-        np.random.seed(seed)
+    分離ルールを適用した後のlogits    """
+    # 決定論的な分離効果を生成（logitsの変動に基づく）
+    if len(logits) <= 1:
+        return logits
     
-    # ランダムノイズを生成
-    noise = np.random.randn(*logits.shape)
+    # logitsの標準偏差に基づいた分離効果
+    logits_std = np.std(logits)
+    if logits_std == 0:
+        # 全て同じ値の場合は小さな分離を加える
+        separation_effect = np.linspace(-0.01, 0.01, len(logits))
+    else:
+        # 正規化されたlogitsの偏差を分離効果として使用
+        separation_effect = (logits - np.mean(logits)) / logits_std
+        # 分離効果を制限
+        separation_effect = np.clip(separation_effect, -1.0, 1.0)
     
-    # 正規化
-    noise = (noise - np.mean(noise)) / (np.std(noise) + 1e-8)
-    
-    return logits + λ_s * noise
+    return logits + λ_s * separation_effect
 
 def apply_boids_rules(logits: np.ndarray, 
                      neighbor_vecs: Optional[np.ndarray], 

@@ -8,416 +8,518 @@ import asyncio
 import torch
 from typing import Dict, List, Optional, Union, Any, TYPE_CHECKING
 import numpy as np
+import os
+import random
+import time
 
 if TYPE_CHECKING:
     from ..memory.blackboard import BlackBoard
 
+
 class LLM:
     """言語モデルのラッパークラス"""
-    def __init__(self, model_path: str, threads: int = 4, quantize: str = "q4"):
+    
+    def __init__(self, model_path: str, threads: int = 4, quantize: str = "q4", n_ctx: int = 512):
         self.model_path = model_path
         self.threads = threads
         self.quantize = quantize
+        self.n_ctx = n_ctx
         self.model = None
         self.tokenizer = None
+        self._dummy_mode = False
         self._initialize()
+
+    # ------------------------------------------------------------------
+    # モデル初期化
+    # ------------------------------------------------------------------
     
     def _initialize(self):
-        """モデルの初期化 - ローカルGGUFファイルまたはHugging Faceモデルを使用"""
+        """モデルの初期化 - ローカルGGUFファイルまたはHugging Faceモデルを使用"""        # GPU を明示的に無効化
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
         try:
-            # CPUで推論を行う設定
-            import os
-            os.environ["CUDA_VISIBLE_DEVICES"] = ""  # GPUを無効化
-            
-            # GGUFファイルの場合とHugging Faceモデルの場合を判別
-            if self.model_path.endswith('.gguf'):
-                # GGUFファイルの場合
+            if self.model_path.endswith(".gguf"):
                 self._initialize_gguf()
             else:
-                # Hugging Faceモデルの場合
                 self._initialize_hf()
-                
         except Exception as e:
-            print(f"Error initializing model: {e}")
-            raise
-    
+            print(f"[WARNING] モデル初期化に失敗しました。ダミーモードで動作します: {e}")
+            # ダミーモードに切り替え
+            self.model = None
+            self.tokenizer = None
+            self._dummy_mode = True
+
     def _initialize_gguf(self):
         """GGUFファイルからモデルを初期化"""
         try:
-            # llama-cpp-pythonを使用してGGUFファイルを読み込む
-            try:
-                from llama_cpp import Llama
-                
-                print(f"Loading GGUF model: {self.model_path}")
-                self.model = Llama(
-                    model_path=self.model_path,
-                    n_threads=self.threads,
-                    verbose=False
-                )
-                # GGUFモデルの場合、tokenizerは内蔵
-                self.tokenizer = None
-                print(f"GGUF model loaded with {self.threads} threads")
-                
-            except ImportError:
-                # llama-cpp-pythonがインストールされていない場合のフォールバック
-                print("llama-cpp-python not available, using dummy implementation")
-                self._initialize_dummy()
-                
+            from llama_cpp import Llama
+
+            # モデルファイルの存在確認
+            if not os.path.exists(self.model_path):
+                raise FileNotFoundError(f"Model file not found: {self.model_path}")
+
+            print(f"Loading GGUF model: {self.model_path}")
+            self.model = Llama(
+                model_path=self.model_path,
+                n_threads=self.threads,
+                n_ctx=self.n_ctx,
+                verbose=False,
+            )
+            self.tokenizer = None  # GGUF では組み込み
+            print(
+                f"GGUF model loaded successfully with {self.threads} threads, context length: {self.n_ctx}"
+            )
+        except ImportError:
+            raise ImportError(
+                "llama-cpp-python is required for GGUF models. "
+                "Install it with: pip install llama-cpp-python"
+            )
         except Exception as e:
-            print(f"Error loading GGUF model: {e}")
-            # フォールバックとしてダミー実装を使用
-            self._initialize_dummy()
-    
+            raise RuntimeError(f"Failed to load GGUF model: {e}")
+
     def _initialize_hf(self):
-        """Hugging Faceモデルから初期化"""
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        
-        print(f"Loading HF model: {self.model_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_path,
-            low_cpu_mem_usage=True,
-            device_map="cpu"
-        )
-        print(f"HF model loaded with {self.threads} threads")
-    
-    def _initialize_dummy(self):
-        """ダミー実装（テスト用）"""
-        print("Using dummy model implementation")
-        self.model = None
-        self.tokenizer = None
-    
-    def forward(self, prompt: str, temperature: float = 0.7, top_p: float = 0.9) -> np.ndarray:
-        """モデルの推論を実行し、logitsを返す"""
+        """Hugging Face モデルから初期化"""
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+
+            print(f"Loading HF model: {self.model_path}")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_path, low_cpu_mem_usage=True, device_map="cpu"
+            )
+            print("HF model loaded successfully on CPU")
+        except ImportError:
+            raise ImportError(
+                "transformers is required for Hugging Face models. "
+                "Install it with: pip install transformers torch"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to load HF model: {e}")
+
+    # ------------------------------------------------------------------
+    # 推論ユーティリティ
+    # ------------------------------------------------------------------
+    def forward(self, prompt: str) -> np.ndarray:
+        """モデルの推論を実行し logits を返す（最後のトークンのみ）"""
         if self.model is None:
-            # ダミー実装の場合
-            return np.random.random(32000)  # 適当なlogitsを返す
-        
-        if hasattr(self.model, 'tokenize'):
-            # GGUFモデル（llama-cpp-python）の場合
+            raise RuntimeError("Model is not initialized. Cannot perform forward pass.")
+
+        # llama‑cpp‑python (GGUF) か transformers (HF) かで分岐
+        if hasattr(self.model, "tokenize"):
             try:
-                tokens = self.model.tokenize(prompt.encode('utf-8'))
+                tokens = self.model.tokenize(prompt.encode("utf-8"))
                 output = self.model(tokens)
-                # 最後のトークンのlogitsを取得
-                return np.array(output['logits'][-1])
-            except:
-                # エラーの場合はダミーlogitsを返す
-                return np.random.random(32000)
+                return np.array(output["logits"][-1])
+            except Exception as e:
+                raise RuntimeError(f"GGUF model forward pass failed: {e}")
         else:
-            # Hugging Faceモデルの場合
-            inputs = self.tokenizer(prompt, return_tensors="pt")
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            
-            # 最後のトークンのlogitsを取得
-            logits = outputs.logits[0, -1, :].numpy()
-            return logits
+            try:
+                import torch
+                inputs = self.tokenizer(prompt, return_tensors="pt")
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                return outputs.logits[0, -1, :].numpy()
+            except Exception as e:
+                raise RuntimeError(f"HF model forward pass failed: {e}")
+
+    # ------------------------------------------------------------------
+    # テキスト生成
+    # ------------------------------------------------------------------
     
     def _format_gemma_prompt(self, prompt: str) -> str:
-        """GEMMAモデル用のプロンプトフォーマット"""
-        # GEMMA-3-1B-ITモデル用のフォーマット
         return f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-    
+
     def _is_gemma_model(self) -> bool:
-        """GEMMAモデルかどうかを判定"""
         return "gemma" in self.model_path.lower()
-    
-    def generate(self, prompt: str, max_tokens: int = 100, **kwargs) -> str:
-        """テキスト生成を行う"""
-        if self.model is None:
-            # ダミー実装の場合
-            return f"Generated response for: {prompt[:50]}..."
-        
-        # GEMMAモデルの場合はプロンプトをフォーマット
-        formatted_prompt = prompt
-        if self._is_gemma_model():
-            formatted_prompt = self._format_gemma_prompt(prompt)
-        
-        if hasattr(self.model, 'tokenize'):
-            # GGUFモデル（llama-cpp-python）の場合
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 100,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        repeat_penalty: float = 1.0,
+        stop: Optional[List[str]] = None,
+    ) -> str:
+        """テキスト生成を実行"""
+        if self._dummy_mode or self.model is None:
+            # ダミーモードの場合、ロール情報を含まない応答を生成
+            dummy_responses = [
+                "そうですね、興味深い観点です。",
+                "もう少し詳しく説明していただけますか？",
+                "それについて考えてみましょう。",
+                "別の視点から見るとどうでしょうか？",
+                "具体的な例があるといいですね。"
+            ]
+            # プロンプトの長さに基づいて疑似ランダムに選択
+            response_idx = len(prompt) % len(dummy_responses)
+            return dummy_responses[response_idx]
+
+        formatted_prompt = (
+            self._format_gemma_prompt(prompt) if self._is_gemma_model() else prompt
+        )
+
+        print(f"[DEBUG] Generating text with prompt: {formatted_prompt[:100]}...")
+
+        # llama‑cpp‑python (GGUF)
+        if hasattr(self.model, "tokenize"):
             try:
-                # stop sequencesを設定（GEMMAモデル用とユーザー指定の両方を考慮）
-                default_stops = ["<end_of_turn>"] if self._is_gemma_model() else []
-                user_stops = kwargs.get("stop", [])
-                if isinstance(user_stops, str):
-                    user_stops = [user_stops]
-                stop_sequences = list(set(default_stops + user_stops))  # 重複を除去
-                
+                stop_sequences = stop or []
+                if self._is_gemma_model():
+                    stop_sequences = list(set(stop_sequences + ["<end_of_turn>"]))
+
                 response = self.model(
                     formatted_prompt,
                     max_tokens=max_tokens,
-                    temperature=kwargs.get("temperature", 0.7),
-                    top_p=kwargs.get("top_p", 0.9),
-                    repeat_penalty=kwargs.get("repeat_penalty", 1.0),
-                    stop=stop_sequences
+                    temperature=temperature,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    stop=stop_sequences,
                 )
-                generated_text = response['choices'][0]['text']
+                text = response["choices"][0]["text"]
                 
-                # GEMMAモデルの場合は余分なタグを除去し、出力をクリーンアップ
-                if self._is_gemma_model():
-                    generated_text = generated_text.replace("<end_of_turn>", "")
-                    generated_text = generated_text.replace("<start_of_turn>", "")
-                    generated_text = generated_text.replace("model\n", "")
-                    generated_text = generated_text.replace("user\n", "")
-                    generated_text = generated_text.strip()
-                
-                return generated_text
-            except:
-                # エラーの場合はダミーレスポンスを返す
-                return f"GGUF model response for: {prompt[:50]}..."
-        else:
-            # Hugging Faceモデルの場合
-            inputs = self.tokenizer(prompt, return_tensors="pt")
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=kwargs.get("temperature", 0.7),
-                top_p=kwargs.get("top_p", 0.9),
-                repetition_penalty=kwargs.get("repeat_penalty", 1.0)
-            )
-            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                print(f"[DEBUG] Raw model response: {text}")
 
+                if self._is_gemma_model():
+                    for tag in ["<end_of_turn>", "<start_of_turn>", "model\n", "user\n"]:
+                        text = text.replace(tag, "")
+                
+                cleaned_text = text.strip()
+                print(f"[DEBUG] Cleaned response: {cleaned_text}")
+                
+                return cleaned_text
+                
+            except Exception as e:
+                raise RuntimeError(f"GGUF text generation failed: {e}")
+
+        # transformers (HF)
+        else:
+            try:
+                import torch
+                inputs = self.tokenizer(prompt, return_tensors="pt")
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repeat_penalty,
+                )
+                generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # 元のプロンプトを除去
+                if generated_text.startswith(prompt):
+                    generated_text = generated_text[len(prompt):].strip()
+                
+                print(f"[DEBUG] HF generated text: {generated_text}")
+                return generated_text
+                
+            except Exception as e:
+                raise RuntimeError(f"HF text generation failed: {e}")
+
+
+# ======================================================================
+# Boids 関連ユーティリティ
+# ======================================================================
 
 class BoidsCtx:
-    """Boidsアルゴリズムのコンテキスト"""
+    """Boids アルゴリズムのコンテキスト"""
+
     def __init__(self, neighbors: List[str], summary_vec: np.ndarray):
         self.neighbors = neighbors
         self.summary_vec = summary_vec
-        self.neighbor_vecs = None
+        self.neighbor_vecs: Optional[np.ndarray] = None
         self._process_neighbors()
-    
+
     def _process_neighbors(self):
-        """近傍テキストをベクトル化"""
-        # 実際の実装では、sentence-transformersなどを使用
-        # ここではダミー実装
-        self.neighbor_vecs = np.random.randn(len(self.neighbors), 384)
-        # 正規化
-        norms = np.linalg.norm(self.neighbor_vecs, axis=1, keepdims=True)
-        self.neighbor_vecs = self.neighbor_vecs / (norms + 1e-8)
+        """近傍データからベクトル表現を計算"""
+        if not self.neighbors:
+            self.neighbor_vecs = np.zeros((0, 384))
+            return
+            
+        # 実際のテキストベースでベクトルを生成
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        texts = []
+        for neighbor in self.neighbors:
+            if isinstance(neighbor, dict) and 'text' in neighbor:
+                texts.append(neighbor['text'])
+            elif isinstance(neighbor, str):
+                texts.append(neighbor)
+            else:
+                texts.append(str(neighbor))
+        
+        if not texts or all(not text.strip() for text in texts):
+            self.neighbor_vecs = np.zeros((len(self.neighbors), 384))
+            return
+            
+        try:
+            vectorizer = TfidfVectorizer(max_features=384, stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(texts)
+            self.neighbor_vecs = tfidf_matrix.toarray()
+            
+            # ベクトル正規化
+            norms = np.linalg.norm(self.neighbor_vecs, axis=1, keepdims=True)
+            self.neighbor_vecs = self.neighbor_vecs / (norms + 1e-8)
+        except Exception as e:
+            print(f"[WARNING] TF-IDF vectorization failed: {e}")
+            # フォールバック: 単語頻度ベースの単純ベクトル化
+            self.neighbor_vecs = np.zeros((len(texts), 384))
+            for i, text in enumerate(texts):
+                words = text.lower().split()
+                for j, word in enumerate(words[:384]):
+                    self.neighbor_vecs[i][j % 384] = len(word) / 10.0            # 正規化
+            norms = np.linalg.norm(self.neighbor_vecs, axis=1, keepdims=True)
+            self.neighbor_vecs = self.neighbor_vecs / (norms + 1e-8)
 
 
 def apply_boids(logits: np.ndarray, ctx: BoidsCtx, λ: Dict[str, float]) -> np.ndarray:
-    """
-    Boidsルールをlogitsに適用する
-    
-    Parameters:
-    -----------
-    logits: 元のモデル出力logits
-    ctx: Boidsコンテキスト（近傍情報）
-    λ: 各ルールの重み係数
-    
-    Returns:
-    --------
-    修正されたlogits
-    """
-    # 1. 整列 (Alignment) - 近傍の平均方向に合わせる
+    """Boids ルールを logits に適用"""
+
     alignment = np.zeros_like(logits)
     if ctx.neighbor_vecs is not None and len(ctx.neighbor_vecs) > 0:
-        # 近傍の平均方向を計算
         mean_dir = np.mean(ctx.neighbor_vecs, axis=0)
-        # 次元が合わない場合は調整
         if len(mean_dir) != len(logits):
-            expanded_mean = np.tile(mean_dir, (len(logits) // len(mean_dir) + 1))[:len(logits)]
-            alignment = expanded_mean * logits
-        else:
-            alignment = mean_dir * logits
-    
-    # 2. 結合 (Cohesion) - トピックの中心に向かう
+            mean_dir = np.tile(mean_dir, (len(logits) // len(mean_dir) + 1))[: len(logits)]
+        alignment = mean_dir * logits
+
     cohesion = np.zeros_like(logits)
     if ctx.summary_vec is not None:
-        # 次元が合わない場合は、summary_vecを拡張またはlogitsを縮小
         if len(ctx.summary_vec) != len(logits):
-            # summary_vecをlogitsの次元に合わせる（簡単な繰り返し）
-            expanded_summary = np.tile(ctx.summary_vec, (len(logits) // len(ctx.summary_vec) + 1))[:len(logits)]
-            cohesion = expanded_summary * logits
+            summary = np.tile(ctx.summary_vec, (len(logits) // len(ctx.summary_vec) + 1))[
+                : len(logits)
+            ]
         else:
-            cohesion = ctx.summary_vec * logits
-    
-    # 3. 分離 (Separation) - 冗長な表現を避ける
-    # エントロピーを増加させる方向に調整
-    separation = np.random.randn(*logits.shape) * 0.1
-    
-    # 重み付き合成
+            summary = ctx.summary_vec
+        cohesion = summary * logits
+
+    # Separation: 分離効果を計算（ランダムではなく、logitsの分散に基づく）
+    separation = np.zeros_like(logits)
+    if len(logits) > 1:
+        # ログit値の標準偏差に基づいて分離を計算
+        logits_std = np.std(logits)
+        if logits_std > 0:
+            # 標準偏差に基づいた分離効果（正規化された違い）
+            normalized_logits = (logits - np.mean(logits)) / logits_std
+            separation = normalized_logits * 0.1
+
     modified_logits = (
-        logits + 
-        λ.get("λ_a", 0.3) * alignment + 
-        λ.get("λ_c", 0.3) * cohesion + 
-        λ.get("λ_s", 0.1) * separation
+        logits
+        + λ.get("λ_a", 0.3) * alignment
+        + λ.get("λ_c", 0.3) * cohesion
+        + λ.get("λ_s", 0.1) * separation
     )
-    
     return modified_logits
 
 
 def sample_top_p(logits: np.ndarray, top_p: float = 0.9) -> int:
-    """Top-p (nucleus) samplingでトークンを選択"""
-    # ソートしたインデックスを取得
+    """Top‑p (nucleus) sampling"""
     sorted_indices = np.argsort(logits)[::-1]
     sorted_logits = logits[sorted_indices]
-    
-    # 累積確率を計算
+
+    # 数値オーバーフローを防ぐためにlogitsを正規化
+    sorted_logits = sorted_logits - sorted_logits.max()
     sorted_probs = np.exp(sorted_logits) / np.sum(np.exp(sorted_logits))
     cumulative_probs = np.cumsum(sorted_probs)
-    
-    # Top-p以下のインデックスをマスク
-    sorted_indices_to_keep = sorted_indices[cumulative_probs <= top_p]
-    
-    # 少なくとも1つのトークンを保持
-    if len(sorted_indices_to_keep) == 0:
-        sorted_indices_to_keep = sorted_indices[0:1]
-    
-    # 確率に従ってサンプリング
-    probs = np.exp(logits[sorted_indices_to_keep]) / np.sum(np.exp(logits[sorted_indices_to_keep]))
-    chosen_idx = np.random.choice(sorted_indices_to_keep, p=probs)
-    
-    return int(chosen_idx)
 
+    keep_mask = cumulative_probs <= top_p
+    if not np.any(keep_mask):
+        keep_mask[0] = True  # 少なくとも一つ保持
+
+    indices_to_keep = sorted_indices[keep_mask]
+    keep_logits = logits[indices_to_keep] - logits[indices_to_keep].max()
+    probs = np.exp(keep_logits) / np.sum(np.exp(keep_logits))
+    return int(np.random.choice(indices_to_keep, p=probs))
+
+
+# ======================================================================
+# SLM エージェント本体
+# ======================================================================
 
 class SLMAgent:
     """Small Language Model Agent"""
-    def __init__(self, id: int, role: str, model: Any, tokenizer: Any, λ: Dict[str, float]):
+
+    def __init__(self, id: int, role: str, model: LLM, tokenizer: Any, λ: Dict[str, float]):
         self.id = id
         self.role = role
         self.model = model
         self.tokenizer = tokenizer
         self.λ = λ
-        self.cache = {}
-    
-    async def generate(self, prompt: str, bb: 'BlackBoard') -> str:
+        self.cache: Dict[str, Any] = {}
+
+        random.seed(time.time() + id)
+        self.alignment_weight = random.uniform(0.2, 0.5)
+        self.separation_weight = random.uniform(0.1, 0.4)
+        self.cohesion_weight = 1.0 - (self.alignment_weight + self.separation_weight)
+        self.view_radius = random.uniform(3.0, 7.0)
+        self.response_style = self._determine_response_style()
+
+        print(
+            f"[DEBUG] Agent {id} ({role}) initialized with weights: "
+            f"a={self.alignment_weight:.2f}, s={self.separation_weight:.2f}, "
+            f"c={self.cohesion_weight:.2f}, radius={self.view_radius:.2f}"
+        )
+
+    # ------------------------------------------------------------------
+    # 内部ユーティリティ
+    # ------------------------------------------------------------------
+    def _determine_response_style(self) -> str:
+        role_styles = {
+            "質問者": "question_focused",
+            "回答者": "solution_focused",
+            "批評者": "analysis_focused",
+            "批判者": "analysis_focused",
+        }
+        return role_styles.get(self.role, "neutral")
+
+    def _build_role_specific_prompt(
+        self, base_prompt: str, conversation_history: List[str]
+    ) -> str:
+        role_instructions = {
+            "質問者": "あなたは好奇心旺盛な質問者です。新しい角度から質問を投げかけ、議論を深めてください。",
+            "回答者": "あなたは知識豊富な回答者です。具体的で建設的な解決策や回答を提供してください。",
+            "批評者": "あなたは冷静な批評者です。客観的な視点で分析し、改善点や問題点を指摘してください。",
+            "批判者": "あなたは冷静な批評者です。客観的な視点で分析し、改善点や問題点を指摘してください。",
+        }
+
+        instruction = role_instructions.get(self.role, "あなたは議論に参加する一員です。建設的な貢献をしてください。")
+
+        prompt = f"{instruction}\n\n"
+        if conversation_history:
+            prompt += "これまでの会話:\n" + "\n".join(conversation_history[-5:]) + "\n\n"
+        prompt += f"あなた({self.role})としての次の発言:"
+
+        print(f"[DEBUG] Agent {self.id} ({self.role}) prompt:\n{prompt}\n--- End Prompt ---")
+        return prompt    # ------------------------------------------------------------------
+    # 応答生成
+    # ------------------------------------------------------------------
+    async def generate(self, prompt: str, bb: "BlackBoard") -> str:
         """
         Boidsルールに基づいてテキスト生成を行う
-        
-        Parameters:
-        -----------
-        prompt: 入力プロンプト
-        bb: BlackBoardインスタンス（共有メモリ）
-        
-        Returns:
-        --------
-        生成されたテキスト
         """
-        # BlackBoardから近傍情報を取得（非同期対応）
         neighbors = await bb.pull(k=16)
-        summary_vec = getattr(bb, 'summary_vec', np.random.randn(384))
+        # BlackBoardから実際の要約ベクトルを取得、なければゼロベクトル
+        summary_vec = getattr(bb, "summary_vec", np.zeros(384))
         ctx = BoidsCtx(neighbors, summary_vec)
-        
-        # LLMの統一されたgenerateメソッドを使用
+
+        print(f"[DEBUG] Agent {self.id} ({self.role}) received {len(neighbors)} neighbors from BlackBoard")
+
+        # Boidsプロンプトプロセッサーを使用してプロンプトを構築
+        from ..boids.prompt_processor import BoidsPromptProcessor
+        processor = BoidsPromptProcessor(bb, self.λ)
+        enhanced_prompt = await processor.process_prompt(prompt, self.id, self.role, k=16)
+
+        print(f"[DEBUG] Agent {self.id} ({self.role}) enhanced prompt:\n{enhanced_prompt[:200]}...")
+
         try:
             generated_text = self.model.generate(
-                prompt,
-                max_tokens=20,
-                temperature=0.7,
+                enhanced_prompt,
+                max_tokens=50,
+                temperature=0.8,
                 top_p=0.9,
-                stop=["<end_of_turn>", "\n", ".", "!", "?", "Human:", "User:", "Assistant:"]
+                stop=[
+                    "<end_of_turn>",
+                    "\n\n",
+                    "Human:",
+                    "User:",
+                    "Assistant:",
+                    "質問者:",
+                    "回答者:",
+                    "批評者:",
+                    "批判者:",
+                ],
             )
             
-            # 最初の単語または短いフレーズを取得
-            if generated_text and generated_text.strip():
-                words = generated_text.strip().split()
-                if words:
-                    return words[0]
-                else:
-                    return "..."
-            else:
-                # フォールバック
-                fallback_words = ["hello", "world", "yes", "no", "think", "know", "good", "bad"]
-                return fallback_words[hash(prompt) % len(fallback_words)]
-                
+            # テキストのクリーンアップ
+            clean_text = generated_text.strip()
+            for role in ["質問者", "回答者", "批評者", "批判者"]:
+                if clean_text.startswith(role + ":"):
+                    clean_text = clean_text[len(role) + 1:].strip()
+            
+            # 空の応答の場合は、役割に応じたフォールバック
+            if not clean_text:
+                clean_text = self._get_role_based_fallback()
+            
+            print(f"[DEBUG] Agent {self.id} ({self.role}) final response: {clean_text}")
+            return clean_text
+            
         except Exception as e:
-            print(f"Error in SLMAgent generate: {e}")
-            # エラー時のフォールバック
-            fallback_words = ["hello", "world", "yes", "no", "think", "know", "good", "bad"]
-            return fallback_words[hash(prompt) % len(fallback_words)]
+            print(f"[ERROR] Agent {self.id} generate error: {e}")
+            # モデルエラーの場合は、より具体的なフォールバック
+            return self._get_role_based_fallback()
     
-    async def run_conversation(self, initial_prompt: str, bb: 'BlackBoard', max_turns: int = 10) -> List[str]:
-        """会話を実行する"""
-        conversation = [initial_prompt]
+    def _get_role_based_fallback(self) -> str:
+        """役割に基づいたフォールバック応答を取得"""
+        fallback_responses = {
+            "質問者": [
+                "なぜそう思うのですか？",
+                "他にはどんな可能性がありますか？", 
+                "具体例を教えてください",
+                "それはどのような理由からですか？"
+            ],
+            "回答者": [
+                "それについて説明しましょう",
+                "解決策を提案します", 
+                "具体的には次のようになります",
+                "私の理解では以下の通りです"
+            ],
+            "批評者": [
+                "その点について検討が必要です",
+                "別の視点から見ると",
+                "改善の余地があります",
+                "より詳細な分析が必要です"
+            ],
+            "批判者": [
+                "その点について検討が必要です",
+                "別の視点から見ると", 
+                "改善の余地があります",
+                "より詳細な分析が必要です"
+            ]
+        }
+        
+        responses = fallback_responses.get(self.role, ["興味深い観点ですね"])
+        # エージェントIDに基づいて一意の応答を選択
+        return responses[self.id % len(responses)]
+
+    # ------------------------------------------------------------------
+    # 会話ループ
+    # ------------------------------------------------------------------
+    async def run_conversation(
+        self, initial_prompt: str, bb: "BlackBoard", max_turns: int = 10
+    ) -> List[str]:
+        conversation: List[str] = [initial_prompt]
         current_prompt = initial_prompt
-        
-        # 初期メッセージをBlackBoardにプッシュ
-        await bb.push({
-            "agent_id": self.id,
-            "role": self.role,
-            "text": f"{self.role}として参加しました: {initial_prompt}",
-            "timestamp": __import__('time').strftime("%H:%M:%S"),
-            "type": "initial_prompt"
-        })
-        
-        # メッセージバッファ
-        message_buffer = ""
-        
-        for i in range(max_turns):
-            # LLMクラスの統一されたgenerateメソッドを使用
+
+        # 初期メッセージを BlackBoard へプッシュ
+        await bb.push(
+            {
+                "agent_id": self.id,
+                "role": self.role,
+                "text": f"{self.role}として参加しました: {initial_prompt}",
+                "timestamp": time.strftime("%H:%M:%S"),
+                "type": "initial_prompt",
+            }
+        )
+
+        for _ in range(max_turns):
             try:
-                # プロンプトの準備
-                base_prompt = f"{current_prompt}\n{self.role}: "
-                
-                # LLMのgenerateメソッドを使用（GEMMAフォーマッターが自動適用される）
-                generated_text = self.model.generate(
-                    base_prompt,
-                    max_tokens=30,
-                    temperature=0.7,
-                    top_p=0.9,
-                    stop=["<end_of_turn>", "\n", "Human:", "User:", "Assistant:", self.role + ":"]
-                )
-                
-                if generated_text and generated_text.strip():
-                    # 完全なメッセージを生成
-                    clean_text = generated_text.strip()
-                    conversation.append(clean_text)
-                    current_prompt += f"\n{self.role}: {clean_text}"
-                    
-                    # BlackBoardにメッセージをプッシュ
-                    await bb.push({
-                        "agent_id": self.id,
-                        "role": self.role,
-                        "text": clean_text,
-                        "timestamp": __import__('time').strftime("%H:%M:%S"),
-                        "type": "message"
-                    })
-                else:
-                    # 生成に失敗した場合のフォールバック
-                    fallback_messages = [
-                        "興味深い観点ですね。",
-                        "それについて考えてみましょう。",
-                        "別の角度から見ると...",
-                        "確かにその通りです。",
-                        "さらに詳しく分析すると...",
-                        "他の可能性も検討してみます。"
-                    ]
-                    fallback_msg = fallback_messages[i % len(fallback_messages)]
-                    conversation.append(fallback_msg)
-                    current_prompt += f"\n{self.role}: {fallback_msg}"
-                    
-                    await bb.push({
-                        "agent_id": self.id,
-                        "role": self.role,
-                        "text": fallback_msg,
-                        "timestamp": __import__('time').strftime("%H:%M:%S"),
-                        "type": "message"
-                    })
-                    
+                response = await self.generate(current_prompt, bb)
             except Exception as e:
                 print(f"Error in conversation generation: {e}")
-                # エラー時のフォールバック
-                error_messages = [
-                    "システムの処理中です...",
-                    "データを分析しています...",
-                    "新しい情報を統合中...",
-                    "結果を確認しています..."
-                ]
-                error_msg = error_messages[i % len(error_messages)]
-                conversation.append(error_msg)
-                
-                await bb.push({
-                    "agent_id": self.id,
-                    "role": self.role,
-                    "text": error_msg,
-                    "timestamp": __import__('time').strftime("%H:%M:%S"),
-                    "type": "message"
-                })
-            
-            # 短い待機時間
-            await asyncio.sleep(0.1)
-        
+                response = "システムの処理中です..."
+
+            conversation.append(response)
+            current_prompt += f"\n{self.role}: {response}"
+
+            message_data = {
+                "agent_id": self.id,
+                "role": self.role,
+                "text": response,
+                "timestamp": time.strftime("%H:%M:%S"),
+                "type": "message",
+                "response_style": self.response_style,
+            }
+            print(f"[DEBUG] Agent {self.id} pushing to BlackBoard: {message_data}")
+            await bb.push(message_data)
+
         return conversation

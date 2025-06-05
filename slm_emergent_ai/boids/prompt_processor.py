@@ -5,9 +5,12 @@ PromptProcessor - Boidsルールをプロンプトエンジニアリングで実
 Boidsアルゴリズムの3つの基本ルール（整列・結合・分離）を実現する。
 """
 
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, TYPE_CHECKING
 import numpy as np
 import random
+
+if TYPE_CHECKING:
+    from ..memory.blackboard import BlackBoard
 
 class BoidsPromptProcessor:
     """
@@ -34,7 +37,6 @@ class BoidsPromptProcessor:
         self.seed = seed
         if seed is not None:
             random.seed(seed)
-    
     async def process_prompt(self, base_prompt: str, agent_id: int, role: str, k: int = 16) -> str:
         """
         Boidsルールに基づいてプロンプトを加工
@@ -49,9 +51,14 @@ class BoidsPromptProcessor:
         Returns:
         --------
         Boidsルールを適用した後のプロンプト
-        """
-        # BlackBoardから近傍情報を取得
+        """        # BlackBoardから近傍情報を取得
         messages = await self.bb.pull(k)
+        
+        print(f"[DEBUG] BoidsPromptProcessor: Agent {agent_id} ({role}) received {len(messages)} messages from BlackBoard")
+        
+        # メッセージのテキスト部分を抽出（messagesは既に文字列のリスト）
+        message_texts = [str(msg) for msg in messages if msg and str(msg).strip()]
+        print(f"[DEBUG] Extracted {len(message_texts)} message texts: {message_texts[:3] if message_texts else 'None'}")
         
         # 各ルールの適用確率を計算（λ値に基づく）
         # 分離ルールの影響を意図的に下げる
@@ -77,9 +84,8 @@ class BoidsPromptProcessor:
             primary_rule = 'cohesion'   # 結合を優先
         else:
             primary_rule = 'separation' # 分離を優先
-        
-        # 整列ルール（Alignment）のプロンプト部分を構築
-        alignment_prompt = await self._build_alignment_prompt(messages)
+          # 整列ルール（Alignment）のプロンプト部分を構築
+        alignment_prompt = await self._build_alignment_prompt(message_texts)
         
         # 結合ルール（Cohesion）のプロンプト部分を構築
         cohesion_prompt = await self._build_cohesion_prompt()
@@ -108,12 +114,23 @@ class BoidsPromptProcessor:
                 boids_instructions.append(alignment_prompt)
             if rule_probs['cohesion'] > 0.2:
                 boids_instructions.append(cohesion_prompt)
+          # 役割に基づく追加の指示
+        role_specific_instructions = {
+            "質問者": "新しい疑問を投げかけ、議論を深める質問をしてください。",
+            "回答者": "具体的で建設的な解決策や回答を提供してください。",
+            "批評者": "客観的な視点で分析し、改善点や問題点を指摘してください。",
+            "批判者": "客観的な視点で分析し、改善点や問題点を指摘してください。"
+        }
+        
+        role_instruction = role_specific_instructions.get(role, "建設的な貢献をしてください。")
         
         # 最終的なプロンプトを構築
         final_prompt = f"""
 {base_prompt}
 
 あなたはエージェント{agent_id}で、役割は「{role}」です。
+{role_instruction}
+
 以下の指示に従って回答してください：
 
 {' '.join(boids_instructions)}

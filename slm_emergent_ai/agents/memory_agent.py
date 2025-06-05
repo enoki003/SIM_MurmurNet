@@ -6,6 +6,7 @@ BlackBoardとRAGを組み合わせて長期記憶と短期記憶を持つエー�
 
 import asyncio
 from typing import Dict, List, Any, Optional, Union
+from ..agents.core import BlackBoard  # Import BlackBoard
 import numpy as np
 
 from ..agents.core import SLMAgent, LLM
@@ -41,7 +42,6 @@ class MemoryAgent:
         self.cache = {}
         self.short_term_memory = []  # 短期記憶
         self.importance_history = []  # 重要度の履歴
-    
     def _calculate_importance(self, text: str) -> float:
         """
         テキストの重要度を計算
@@ -54,10 +54,24 @@ class MemoryAgent:
         --------
         重要度スコア (0.0-1.0)
         """
-        # 実際の実装では、テキストの情報量や新規性などに基づいて重要度を計算
-        # ここではダミー実装
-        import random
-        return random.uniform(0.0, 1.0)
+        # テキストの長さ、語彙の豊富さ、情報密度に基づいて重要度を計算
+        if not text or not text.strip():
+            return 0.0
+        
+        # 基本的な重要度計算（実装可能な範囲で）
+        words = text.strip().split()
+        word_count = len(words)
+        unique_words = len(set(words))
+        
+        # 長さによる重要度（適度な長さが重要）
+        length_score = min(word_count / 50, 1.0) if word_count > 0 else 0.0
+        
+        # 語彙の多様性による重要度
+        diversity_score = unique_words / word_count if word_count > 0 else 0.0
+        
+        # 総合スコア
+        importance = (length_score * 0.6 + diversity_score * 0.4)
+        return min(max(importance, 0.0), 1.0)
     
     async def _store_to_long_term_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """

@@ -7,6 +7,7 @@ Boidsアルゴリズムをモデル生成時に適用するためのプロセッ
 
 import torch
 from typing import Dict, List, Optional, Union, Any
+from ..boids.blackboard import BlackBoard  # Import BlackBoard from the appropriate module
 import numpy as np
 from transformers import LogitsProcessor
 
@@ -110,17 +111,39 @@ class BoidsProcessor:
         Returns:
         --------
         Boidsルールを適用した後のlogits
-        """
-        # BlackBoardから近傍情報を取得
+        """        # BlackBoardから近傍情報を取得
         messages = self.bb.pull(k)
         
+        # 実際の埋め込みベクトルサービスが利用できない場合のフォールバック
         # 実際の実装では、sentence-transformersなどを使用してベクトル化
-        # ここではダミー実装
-        neighbor_vecs = np.random.randn(len(messages), 384)
-        # 正規化
-        if len(neighbor_vecs) > 0:
-            norms = np.linalg.norm(neighbor_vecs, axis=1, keepdims=True)
-            neighbor_vecs = neighbor_vecs / (norms + 1e-8)
+        neighbor_vecs = []
+        for msg in messages:
+            try:
+                # 簡単なTF-IDFベースの代替実装
+                words = msg.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+                
+                # 固定次元のベクトルを生成
+                vec = np.zeros(384)
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    vec[i] = word_freq[word]
+                
+                # 正規化
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                else:
+                    vec = np.zeros(384)
+                    
+                neighbor_vecs.append(vec)
+            except Exception as e:
+                print(f"Error generating message embedding: {e}")
+                # エラーの場合はゼロベクトルを使用
+                neighbor_vecs.append(np.zeros(384))
+        
+        neighbor_vecs = np.array(neighbor_vecs) if neighbor_vecs else np.array([]).reshape(0, 384)
         
         # Boidsルールを適用
         modified_logits = apply_boids_rules(
