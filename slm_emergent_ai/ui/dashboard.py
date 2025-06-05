@@ -9,6 +9,40 @@ import asyncio
 import json
 import os
 from typing import Dict, List, Any, Optional
+
+# Import BlackBoard if it exists in another module
+try:
+    # Attempt to import BlackBoard; fallback to placeholder if unavailable
+    try:
+        from some_module import BlackBoard
+    except ImportError:
+        # Define a placeholder BlackBoard class if not available
+        class BlackBoard:
+            async def get_param(self, key: str, default: Any) -> Any:
+                return default
+
+            async def pull(self, k: int) -> List[Dict[str, Any]]:
+                return []
+
+            async def push(self, message: Dict[str, Any]) -> None:
+                pass
+
+            async def pull_messages_raw(self, k: int) -> List[Dict[str, Any]]:
+                return []
+except ImportError:
+    # Define a placeholder BlackBoard class if not available
+    class BlackBoard:
+        async def get_param(self, key: str, default: Any) -> Any:
+            return default
+
+        async def pull(self, k: int) -> List[Dict[str, Any]]:
+            return []
+
+        async def push(self, message: Dict[str, Any]) -> None:
+            pass
+
+        async def pull_messages_raw(self, k: int) -> List[Dict[str, Any]]:
+            return []
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -589,35 +623,20 @@ class Dashboard:
                 # 現在時刻からランダム性を加えて値を微小変動させる（可視化のため）
                 import random
                 import time
-                
-                # 時間をシードにしたランダム性
-                random.seed(int(time.time() * 10) % 1000)
-                
-                # 値をわずかに揺らがせる
-                latest_metrics["entropy"] += (random.random() - 0.5) * 0.3
-                latest_metrics["vdi"] += (random.random() - 0.5) * 0.05
-                latest_metrics["fcr"] += (random.random() - 0.5) * 0.05
-                latest_metrics["speed"] += (random.random() - 0.5) * 2.0
-                
+                  # BlackBoardから実際のメトリクスを取得
                 return latest_metrics
             else:
-                # ダミーデータ（BlackBoardが利用できない場合）
-                import random
-                import time
-                
-                # 時間をシードにしたランダム性
-                random.seed(int(time.time() * 10) % 1000)
-                
-                # ダミーデータ生成
+                # BlackBoardが利用できない場合のデフォルト値
+                print("BlackBoard not available for metrics")
                 return {
-                    "entropy": 4.0 + random.random() * 2.0,
-                    "vdi": 0.5 + random.random() * 0.5,
-                    "fcr": 0.7 + random.random() * 0.3,
-                    "speed": 10.0 + random.random() * 10.0,
+                    "entropy": 0.0,
+                    "vdi": 0.0,
+                    "fcr": 0.0,
+                    "speed": 0.0,
                     "lambda": {
-                        "a": 0.2 + random.random() * 0.2,
-                        "c": 0.2 + random.random() * 0.2,
-                        "s": 0.05 + random.random() * 0.1
+                        "a": 0.3,
+                        "c": 0.3,
+                        "s": 0.1
                     }
                 }
         except Exception as e:
@@ -687,25 +706,14 @@ class Dashboard:
                         'text': 'エージェントの会話がまだ開始されていません。',
                         'timestamp': __import__('time').strftime("%H:%M:%S")
                     })
-                
-                # 最新のメッセージを先頭に
+                  # 最新のメッセージを先頭に
                 formatted_messages.reverse()
                 
                 return {"messages": formatted_messages}
             else:
-                # ダミーデータ（BlackBoardが利用できない場合）
-                import random
-                import time
-                
-                dummy_messages = [
-                    {"agent_id": "Agent 1", "text": "複数のエージェント間での情報共有を開始します", "timestamp": time.strftime("%H:%M:%S")},
-                    {"agent_id": "Agent 2", "text": "創発的な知能パターンを分析しています", "timestamp": time.strftime("%H:%M:%S")},
-                    {"agent_id": "Agent 3", "text": f"現在のエントロピーレベル: {random.uniform(3.5, 5.5):.2f}", "timestamp": time.strftime("%H:%M:%S")},
-                    {"agent_id": "Agent 4", "text": "近隣エージェントと協調動作を行っています", "timestamp": time.strftime("%H:%M:%S")},
-                    {"agent_id": "Agent 5", "text": "行動パラメータを適応的に調整中...", "timestamp": time.strftime("%H:%M:%S")},
-                ]
-                
-                return {"messages": dummy_messages}
+                # BlackBoardが利用できない場合
+                print("BlackBoard not available for dashboard")
+                return {"messages": []}
         except Exception as e:
             print(f"Error fetching blackboard: {e}")
             return {"messages": []}

@@ -7,6 +7,7 @@ gemma3:1bモデルの読み込みと量子化を行うユーティリティ関�
 import os
 import torch
 from typing import Dict, Any, Optional
+from transformers import AutoModelForCausalLM  # Add this import
 
 def load_model(model_path: str, quantize: str = "q4", threads: int = 4) -> Dict[str, Any]:
     """

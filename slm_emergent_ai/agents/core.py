@@ -321,7 +321,7 @@ class SLMAgent:
                         "timestamp": time.time()
                     }
                     
-                    await bb.push_message(message)
+                    await bb.push(message)
                     print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) turn {turn}: {response.strip()[:100]}...")
                 else:
                     print(f"[WARNING] Agent {self.id} ({self.name}/{self.role}) generated empty response at turn {turn}")

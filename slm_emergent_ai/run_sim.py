@@ -238,10 +238,17 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901  (長い
                             len({msg.get("text", "") for msg in last_msgs}) / len(last_msgs)
                             if last_msgs
                             else 0
-                        ),
-                    }
+                        ),                    }
                     print(f"[METRICS] Step {step_counter}: {current_metrics}")
-                    metrics_tracker.log_step(current_metrics)
+                    
+                    # MetricsTrackerに個別に更新
+                    metrics_tracker.update_entropy(current_metrics.get('entropy', 0.0))
+                    metrics_tracker.update_vdi(current_metrics.get('vdi', 0.0))
+                    metrics_tracker.update_fcr(current_metrics.get('fcr', 0.0))
+                    metrics_tracker.update_speed(current_metrics.get('speed', 0.0))
+                    for lambda_key in ['λ_a', 'λ_c', 'λ_s']:
+                        if lambda_key in current_metrics:
+                            metrics_tracker.update_lambda(lambda_key, current_metrics[lambda_key])
                 except Exception as e:  # noqa: BLE001
                     print(f"[ERROR] Metrics calculation failed: {e}")
 

@@ -143,12 +143,31 @@ class BlackBoard:
             
             # メッセージを結合
             text = " ".join(messages)
-            
+              # 実際の埋め込みベクトルサービスが利用できない場合のフォールバック
             # 実際の実装では、sentence-transformersなどを使用して埋め込みベクトルを計算
-            # ここではダミー実装
-            vector = np.random.randn(384)
-            # 正規化
-            vector = vector / (np.linalg.norm(vector) + 1e-8)
+            try:
+                # 簡単なTF-IDFベースの代替実装（実際のサービスが利用できない場合）
+                words = text.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+                
+                # 固定次元のベクトルを生成（単語頻度ベース）
+                vector = np.zeros(384)
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    vector[i] = word_freq[word]
+                
+                # 正規化
+                norm = np.linalg.norm(vector)
+                if norm > 0:
+                    vector = vector / norm
+                else:
+                    # 空のテキストの場合はゼロベクトル
+                    vector = np.zeros(384)
+            except Exception as e:
+                print(f"Error generating text embedding: {e}")
+                # 最後の手段として、ゼロベクトルを使用
+                vector = np.zeros(384)
             
             # 要約を保存
             self.backend.save_summary(text[:200], vector)

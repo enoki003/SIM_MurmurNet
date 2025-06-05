@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 class EnhancedDashboard:
     """SLM Emergent AIの改良版ダッシュボード"""
-    def __init__(self, port: int = 8001, bb: Optional = None, metrics_server_url: str = "http://localhost:7861"):
+    def __init__(self, port: int = 8001, bb: Optional[Any] = None, metrics_server_url: str = "http://localhost:7861"):
         """
         Enhanced Dashboardの初期化
         
@@ -565,32 +565,61 @@ class EnhancedDashboard:
                 "lambda_s": 0.1,
                 "timestamp": time.time()
             }
-    
     async def _fetch_blackboard(self) -> Dict[str, Any]:
-        """BlackBoardの情報を取得（ダミーデータ）"""
+        """BlackBoardの情報を取得"""
         try:
-            # 動的なダミーメッセージを生成
-            import random
-            
-            sample_messages = [
-                "システムパフォーマンスを分析中...",
-                "新しいパターンを検出しました",
-                "エージェント間の協調が改善されています",
-                "メトリクス計算を更新しました",
-                "データ整合性チェック完了",
-                "最適化プロセスを実行中",
-                "分散処理が効率的に動作中"
-            ]
-            
-            messages = []
-            for i in range(5):
-                messages.append({
-                    "agent_id": random.randint(1, 5),
-                    "text": random.choice(sample_messages),
-                    "timestamp": time.time() - i * 10
-                })
-            
-            return {"messages": messages}
+            if self.bb:
+                # BlackBoardから最新のメッセージを取得
+                messages = await self.bb.pull_messages_raw(k=50)  # 最新50件を取得
+                
+                # メッセージを整形
+                formatted_messages = []
+                for i, msg in enumerate(messages):
+                    if isinstance(msg, dict):
+                        # メッセージが辞書形式の場合
+                        agent_id = msg.get('agent_id', f'Agent_{i}')
+                        role = msg.get('role', f'Agent_{agent_id}')
+                        text = msg.get('text', '')
+                        
+                        # テキストが空または単なるトークン番号の場合はスキップ
+                        if not text or text.startswith('token_') and len(text) < 20:
+                            continue
+                            
+                        # トークン番号だけの場合は除外
+                        if len(text.strip()) < 3:
+                            continue
+                            
+                        # エージェント表示名のフォーマット
+                        display_name = role if role != f'Agent_{agent_id}' else f'Agent {agent_id}'
+                        
+                        formatted_messages.append({
+                            'agent_id': display_name,
+                            'text': text,
+                            'timestamp': msg.get('timestamp', '')
+                        })
+                    elif isinstance(msg, str) and len(msg.strip()) > 3:
+                        # メッセージが文字列の場合
+                        # トークン番号だけの文字列は除外
+                        if msg.startswith('token_') and len(msg) < 20:
+                            continue
+                            
+                        formatted_messages.append({
+                            'agent_id': f'Agent {i % 5 + 1}',  # 5つのエージェントIDを循環
+                            'text': str(msg),
+                            'timestamp': ''
+                        })
+                
+                # メッセージがない場合は空のリストを返す
+                if not formatted_messages:
+                    formatted_messages = []
+                
+                # 最新のメッセージを先頭に
+                formatted_messages.reverse()
+                
+                return {"messages": formatted_messages}
+            else:
+                print("BlackBoard not available for dashboard")
+                return {"messages": []}
         except Exception as e:
             print(f"Error fetching blackboard: {e}")
             return {"messages": []}
