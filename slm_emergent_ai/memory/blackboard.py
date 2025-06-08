@@ -13,6 +13,7 @@ import numpy as np
 
 from .db_sqlite import SQLiteBackend
 from .db_redis import RedisBackend
+from ..services.embedding_service import EmbeddingService # Added import
 
 class BlackBoard:
     """
@@ -34,6 +35,7 @@ class BlackBoard:
         self.redis_url = redis_url
         self.backend = backend
         self.summary_vec = np.zeros(384)  # 埋め込みベクトルの次元数
+        self.embedding_service = EmbeddingService() # Instantiated EmbeddingService
         if backend is None:
             self._initialize()
     
@@ -142,35 +144,22 @@ class BlackBoard:
                 return
             
             # メッセージを結合
-            text = " ".join(messages)
-              # 実際の埋め込みベクトルサービスが利用できない場合のフォールバック
-            # 実際の実装では、sentence-transformersなどを使用して埋め込みベクトルを計算
-            try:
-                # 簡単なTF-IDFベースの代替実装（実際のサービスが利用できない場合）
-                words = text.lower().split()
-                word_freq = {}
-                for word in words:
-                    word_freq[word] = word_freq.get(word, 0) + 1
-                
-                # 固定次元のベクトルを生成（単語頻度ベース）
-                vector = np.zeros(384)
-                for i, word in enumerate(sorted(word_freq.keys())[:384]):
-                    vector[i] = word_freq[word]
-                
-                # 正規化
-                norm = np.linalg.norm(vector)
-                if norm > 0:
-                    vector = vector / norm
-                else:
-                    # 空のテキストの場合はゼロベクトル
-                    vector = np.zeros(384)
-            except Exception as e:
-                print(f"Error generating text embedding: {e}")
-                # 最後の手段として、ゼロベクトルを使用
-                vector = np.zeros(384)
+            text = " ".join(messages) # Ensure messages are strings
             
-            # 要約を保存
-            self.backend.save_summary(text[:200], vector)
+            # Generate embedding using the service
+            # The service returns List[float], convert to np.array for backend and summary_vec
+            embedding_list = self.embedding_service.generate_embedding(text)
+            vector = np.array(embedding_list, dtype=np.float32)
+
+            # Ensure vector is of the expected shape, e.g. (384,)
+            # The EmbeddingService is already configured for a dimension of 384.
+            if vector.shape[0] != self.summary_vec.shape[0]:
+                # Fallback or error handling if dimensions mismatch
+                print(f"[ERROR] Embedding dimension mismatch. Expected {self.summary_vec.shape[0]}, got {vector.shape[0]}. Using zero vector.")
+                vector = np.zeros_like(self.summary_vec)
+
+            # 要約を保存 (text[:200] is the summary text, vector is its embedding)
+            self.backend.save_summary(text[:200], vector) # Storing first 200 chars of combined messages as summary
             
             # 要約ベクトルを更新
             self.summary_vec = vector
@@ -259,45 +248,46 @@ class BlackBoard:
             print(f"Error clearing BlackBoard: {e}")
             return False
     
-    def get_topic_summary(self) -> str:
+    def get_topic_summary(self, max_words: int = 30) -> str:
         """
         現在のトピックサマリーを取得（プロンプトエンジニアリング用）
-        
+
+        Args:
+            max_words: 返されるサマリーの最大単語数。
+
         Returns:
-        --------
-        トピックサマリー文字列
+            トピックサマリー文字列（指定された単語数に切り詰められる可能性あり）
         """
+        summary_text = ""
         try:
             # 最新のサマリー情報を取得
             summary_info = self.backend.get_latest_summary()
             
-            if summary_info and "summary" in summary_info:
-                return summary_info["summary"]
-            
-            # サマリーがない場合は、最新のメッセージから簡易的に生成
-            raw_messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
-            
-            if not raw_messages:
-                return ""
-            
-            # メッセージを文字列形式に変換
-            text_messages = []
-            for msg in raw_messages:
-                if isinstance(msg, dict):
-                    # 辞書の場合は 'text' フィールドを抽出
-                    text_messages.append(str(msg.get('text', '')))
-                else:
-                    # 文字列の場合はそのまま使用
-                    text_messages.append(str(msg))
-            
-            # 簡易的な要約（実際の実装ではより高度な要約技術を使用）
-            words = " ".join(text_messages).split()
-            if len(words) > 30:
-                summary = " ".join(words[:30]) + "..."
+            if summary_info and "summary" in summary_info and summary_info["summary"]:
+                summary_text = summary_info["summary"]
             else:
-                summary = " ".join(words)
+                # サマリーがない場合は、最新のメッセージから簡易的に生成
+                raw_messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
+                if not raw_messages:
+                    return ""
+
+                text_messages = []
+                for msg in raw_messages:
+                    if isinstance(msg, dict):
+                        text_messages.append(str(msg.get('text', '')))
+                    else:
+                        text_messages.append(str(msg))
+
+                summary_text = " ".join(text_messages)
+
+            # 取得したまたは生成したサマリーを単語数で切り詰める
+            words = summary_text.split()
+            if len(words) > max_words:
+                concise_summary = " ".join(words[:max_words]) + "..."
+            else:
+                concise_summary = " ".join(words)
             
-            return summary
+            return concise_summary.strip()
             
         except Exception as e:
             print(f"Error getting topic summary: {e}")

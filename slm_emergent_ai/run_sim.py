@@ -122,9 +122,11 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901  (長い
             id=i + 1,
             role=role,
             model=model,
-            tokenizer=model.tokenizer,
+            tokenizer=model.tokenizer, # model is an instance of LLM, which should have a tokenizer attribute
             λ=lambda_params,
             name=name,
+            blackboard=bb,  # Pass the blackboard instance
+            boids_config=config.get("boids_enhancer", {}) # Pass boids specific config
         )
         agents.append(agent)
         print(f"[DEBUG] Agent {i + 1} ({name}) initialized with role: {role}")
@@ -198,59 +200,102 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901  (長い
     # メトリクス更新ループ
     # ------------------------------------------------------------------
     async def metrics_update_loop() -> None:
-        nonlocal step_counter, simulation_logs
+        nonlocal step_counter, simulation_logs, model, metrics_tracker, bb  # Ensure model and metrics_tracker are in scope
+        total_tokens_generated_so_far = 0 # Initialize total tokens
+
         while True:
-            await asyncio.sleep(2)  # 2 秒間隔
+            await asyncio.sleep(2)  # 2 秒間隔 (configurable metric update interval)
             step_counter += 1
 
-            recent_messages = await bb.pull_messages_raw(k=20)
+            # --- Data Collection ---
+            # For VDI: Aggregate tokens from recent messages
+            # For Speed: Aggregate all tokens generated so far
+            all_messages_raw = await bb.pull_messages_raw(k=-1) # Get all messages for token count and VDI
+
+            all_texts_for_vdi = []
+            current_total_tokens = 0
+            processed_texts_for_vdi = []
+
+            if model.tokenizer: # Check if tokenizer is available
+                for msg in all_messages_raw:
+                    if isinstance(msg, dict) and "text" in msg:
+                        text_content = msg.get("text", "")
+                        # For VDI, use tokens from recent messages (e.g., last 20 as before, or a configurable number)
+                        # For simplicity here, let's use text from all_messages_raw for VDI calculation for now
+                        # but ideally, this should be from a more focused window.
+                        processed_texts_for_vdi.append(text_content)
+                        current_total_tokens += len(model.tokenizer.encode(text_content))
+
+                # Aggregate tokens from recent messages for VDI
+                # Using last N messages for VDI calculation, let's say last 50 messages or 1000 tokens.
+                # The current calculate_vdi takes a list of tokens and a window_size for *that list*.
+                # So we need to provide a list of tokens from recent messages.
+
+                # Let's collect tokens from the last 20 messages for VDI as it was somewhat implied by original code.
+                recent_messages_for_vdi_calc = all_messages_raw[-20:]
+                vdi_texts = [msg.get("text", "") for msg in recent_messages_for_vdi_calc if isinstance(msg, dict)]
+                vdi_tokens = []
+                for text_content in vdi_texts:
+                    vdi_tokens.extend(model.tokenizer.encode(text_content))
+
+            else: # Fallback if tokenizer is not available (e.g. simple char/word count)
+                for msg in all_messages_raw:
+                    if isinstance(msg, dict) and "text" in msg:
+                        text_content = msg.get("text", "")
+                        processed_texts_for_vdi.append(text_content)
+                        current_total_tokens += len(text_content.split()) # simple word count
+
+                recent_messages_for_vdi_calc = all_messages_raw[-20:]
+                vdi_texts = [msg.get("text", "") for msg in recent_messages_for_vdi_calc if isinstance(msg, dict)]
+                # Simple tokenization for VDI if no tokenizer
+                vdi_tokens = [word for text_content in vdi_texts for word in text_content.split()]
+
+
+            total_tokens_generated_so_far = current_total_tokens
+
+            # For FCR: Pass an empty list (placeholder)
+            fact_check_results = []
+
+            # For Entropy: No probability distribution source, so pass default or skip.
+            # We will call metrics_tracker.update_entropy(0.0) directly.
+
+            # --- Metric Calculation ---
+            vdi_value = calculate_vdi(vdi_tokens) # calculate_vdi is imported from metrics.py
+            fcr_value = calculate_fcr(fact_check_results) # calculate_fcr is imported
+
+            # --- Tracker Updates ---
+            metrics_tracker.update_vdi(vdi_value)
+            metrics_tracker.update_fcr(fcr_value)
+            metrics_tracker.update_entropy(0.0) # Default value for entropy
+            metrics_tracker.update_token_count(total_tokens_generated_so_far) # This will trigger speed calculation
+
+            # Logging (similar to before, but can now include new metrics from tracker)
             agent_responses = {
                 msg.get("agent_id", 0): msg.get("text", "")
-                for msg in recent_messages[-3:]
+                for msg in all_messages_raw[-3:] # Use all_messages_raw to get latest
                 if isinstance(msg, dict)
             }
-
             step_log = {
                 "step": step_counter,
                 "timestamp": time.strftime("%H:%M:%S"),
                 "agent_responses": agent_responses,
-                "total_messages": len(recent_messages),
+                "total_messages": len(all_messages_raw),
+                "calculated_vdi": vdi_value,
+                "calculated_fcr": fcr_value,
+                "total_tokens_for_speed": total_tokens_generated_so_far,
+                "current_speed": metrics_tracker.current_metrics.get('speed', 0.0)
             }
             simulation_logs.append(step_log)
 
             if eval_enabled and step_counter % eval_freq == 0:
-                try:
-                    last_msgs = [
-                        msg for msg in recent_messages if isinstance(msg, dict)
-                    ][-10:]
-                    current_metrics = {
-                        "step": step_counter,
-                        "total_messages": len(recent_messages),
-                        "unique_agents": len(
-                            {msg.get("agent_id", 0) for msg in recent_messages if isinstance(msg, dict)}
-                        ),
-                        "avg_message_length": (
-                            sum(len(msg.get("text", "")) for msg in last_msgs) / len(last_msgs)
-                            if last_msgs
-                            else 0
-                        ),
-                        "conversation_diversity": (
-                            len({msg.get("text", "") for msg in last_msgs}) / len(last_msgs)
-                            if last_msgs
-                            else 0
-                        ),                    }
-                    print(f"[METRICS] Step {step_counter}: {current_metrics}")
-                    
-                    # MetricsTrackerに個別に更新
-                    metrics_tracker.update_entropy(current_metrics.get('entropy', 0.0))
-                    metrics_tracker.update_vdi(current_metrics.get('vdi', 0.0))
-                    metrics_tracker.update_fcr(current_metrics.get('fcr', 0.0))
-                    metrics_tracker.update_speed(current_metrics.get('speed', 0.0))
-                    for lambda_key in ['λ_a', 'λ_c', 'λ_s']:
-                        if lambda_key in current_metrics:
-                            metrics_tracker.update_lambda(lambda_key, current_metrics[lambda_key])
-                except Exception as e:  # noqa: BLE001
-                    print(f"[ERROR] Metrics calculation failed: {e}")
+                # The old current_metrics dict is mostly replaced by direct calculations and tracker updates
+                # We can log the metrics tracker's current state
+                current_tracked_metrics = metrics_tracker.get_current_metrics()
+                print(f"[METRICS] Step {step_counter}: {current_tracked_metrics}")
+                # Lambda parameters are updated by the controller, not directly here.
+                # If lambda params were part of current_metrics before, ensure controller still updates them in blackboard.
+                # The metrics_tracker has update_lambda, but it should be called by controller if it changes them.
+
 
     metrics_task = asyncio.create_task(metrics_update_loop())
 

@@ -17,6 +17,8 @@ import torch
 if TYPE_CHECKING:
     from ..memory.blackboard import BlackBoard
 
+from .boids_enhancer import BoidsPromptEnhancer # Added import
+
 # グローバルセマフォ - モデルへの同時アクセスを制御
 _model_semaphore = asyncio.Semaphore(1)  # 同時アクセス数を1に制限
 
@@ -214,27 +216,38 @@ class SLMAgent:
         tokenizer: Any,
         λ: Dict[str, float],
         name: Optional[str] = None,
+        # Added blackboard and boids_config for BoidsPromptEnhancer
+        blackboard: "BlackBoard",
+        boids_config: Optional[Dict[str, Any]] = None
     ):
         self.id = id
         self.role = role
         self.name = name if name else f"{role}_{id}"
         self.model = model
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer # This might be model.tokenizer if model is always LLM instance
         self.λ = λ
         self.cache: Dict[str, Any] = {}
 
-        # Boids パラメータをランダム初期化
-        random.seed(time.time() + id)
-        self.alignment_weight = random.uniform(0.2, 0.5)
-        self.separation_weight = random.uniform(0.1, 0.4)
-        self.cohesion_weight = 1.0 - (self.alignment_weight + self.separation_weight)
-        self.view_radius = random.uniform(3.0, 7.0)
+        # Instantiate BoidsPromptEnhancer
+        # LLM model and tokenizer can be passed from self.model if needed by enhancer in future
+        self.boids_enhancer = BoidsPromptEnhancer(
+            blackboard=blackboard,
+            config=boids_config,
+            llm_model=self.model, # Pass the agent's LLM model
+            tokenizer=self.model.tokenizer if hasattr(self.model, 'tokenizer') else self.tokenizer # Pass the tokenizer
+        )
+
+        # Boids parameters (alignment_weight, etc.) are now managed by BoidsPromptEnhancer if needed,
+        # or can be kept here if they influence other agent logic beyond prompt enhancement.
+        # For now, let's assume they are not directly used by SLMAgent after refactoring.
+        # self.alignment_weight = random.uniform(0.2, 0.5) # Example, remove if not used
+        # self.separation_weight = random.uniform(0.1, 0.4) # Example, remove if not used
+        # self.cohesion_weight = 1.0 - (self.alignment_weight + self.separation_weight) # Example, remove if not used
+        # self.view_radius = random.uniform(3.0, 7.0) # Example, remove if not used
         self.response_style = self._determine_response_style()
 
         print(
-            f"[DEBUG] Agent {id} ({self.name}/{role}) initialized with weights: "
-            f"a={self.alignment_weight:.2f}, s={self.separation_weight:.2f}, "
-            f"c={self.cohesion_weight:.2f}, radius={self.view_radius:.2f}"
+            f"[DEBUG] Agent {id} ({self.name}/{role}) initialized."
         )
 
     # ------------------------------------------------------------------
@@ -302,10 +315,27 @@ class SLMAgent:
                 conversation_history = await bb.pull_messages_raw(k=10)
                 
                 # 役割特化プロンプトを生成
-                enhanced_prompt = self._build_role_specific_prompt(initial_prompt, conversation_history)
+                base_agent_prompt = self._build_role_specific_prompt(initial_prompt, conversation_history)
                 
+                # Gather agent's own recent messages for the enhancer
+                own_recent_messages = []
+                if conversation_history: # conversation_history contains all recent messages
+                    for msg in conversation_history: # Iterate from oldest to newest
+                        if isinstance(msg, dict) and msg.get("agent_id") == self.id:
+                            own_recent_messages.append({
+                                "id": msg.get("id", str(msg.get("timestamp"))), # Ensure ID for enhancer
+                                "text": msg.get("text", "")
+                            })
+                own_recent_messages = own_recent_messages[-3:] # Take last 3, or make configurable
+
                 # Boidsアルゴリズムを適用してプロンプトを強化
-                boids_enhanced_prompt = self._apply_boids_enhancement(enhanced_prompt, bb)
+                # Note: enhanced_prompt from _build_role_specific_prompt is now base_agent_prompt
+                boids_enhanced_prompt = await self.boids_enhancer.enhance_prompt(
+                    base_prompt=base_agent_prompt,
+                    agent_role=self.role,
+                    agent_id=self.id,
+                    agent_recent_messages=own_recent_messages
+                )
                 
                 # LLMで応答生成
                 response = await self._generate_response(boids_enhanced_prompt)
@@ -390,135 +420,7 @@ class SLMAgent:
             print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) sync generation failed: {e}")
             return f"[ERROR] 応答生成エラー: {e}"
 
-    # ------------------------------------------------------------------
-    # Boids アルゴリズム関連メソッド
-    # ------------------------------------------------------------------
-
-    def _apply_boids_enhancement(self, prompt: str, bb: "BlackBoard") -> str:
-        """
-        Boidsアルゴリズムを適用してプロンプトを強化
-        
-        Parameters:
-        -----------
-        prompt: 基本プロンプト
-        bb: BlackBoardインスタンス
-        
-        Returns:
-        --------
-        強化されたプロンプト
-        """
-        try:
-            # 近隣エージェントの行動を分析
-            neighbor_actions = self._analyze_neighbors(bb)
-            
-            # Boidsルールを適用
-            alignment_guidance = self._calculate_alignment(neighbor_actions)
-            separation_guidance = self._calculate_separation(neighbor_actions)
-            cohesion_guidance = self._calculate_cohesion(neighbor_actions)
-            
-            # プロンプトにBoids情報を組み込み
-            boids_context = f"""
-近隣エージェントの動向:
-- 整列: {alignment_guidance}
-- 分離: {separation_guidance}  
-- 結束: {cohesion_guidance}
-
-あなたの応答スタイル: {self.response_style}
-"""
-            
-            return f"{boids_context}\n\n{prompt}"
-            
-        except Exception as e:
-            print(f"[DEBUG] Boids enhancement failed, using basic prompt: {e}")
-            return prompt
-
-    def _analyze_neighbors(self, bb: "BlackBoard") -> List[Dict[str, Any]]:
-        """
-        近隣エージェントの行動を分析
-        
-        Parameters:
-        -----------
-        bb: BlackBoardインスタンス
-        
-        Returns:
-        --------
-        近隣エージェントの行動リスト
-        """
-        try:
-            # 非同期メソッドを同期的に呼び出し（簡易実装）
-            import asyncio
-            if asyncio.iscoroutinefunction(bb.pull_messages_raw):
-                # 既存のイベントループ内で実行されている場合
-                try:
-                    loop = asyncio.get_running_loop()
-                    # 新しいタスクとして実行
-                    task = loop.create_task(bb.pull_messages_raw(k=5))
-                    # タスクが完了するまで待機（注意: これは推奨されない方法）
-                    return []  # 暫定的に空リストを返す
-                except RuntimeError:
-                    return []
-            else:
-                return bb.pull_messages_raw(k=5)
-        except Exception as e:
-            print(f"[DEBUG] Failed to analyze neighbors: {e}")
-            return []
-
-    def _calculate_alignment(self, neighbor_actions: List[Dict[str, Any]]) -> str:
-        """整列ルールの計算"""
-        if not neighbor_actions:
-            return "周囲に他のエージェントなし"
-        
-        # 近隣エージェントの役割分布を分析
-        roles = [action.get("role", "unknown") for action in neighbor_actions]
-        role_counts = {}
-        for role in roles:
-            role_counts[role] = role_counts.get(role, 0) + 1
-        
-        dominant_role = max(role_counts, key=role_counts.get) if role_counts else "unknown"
-        
-        if dominant_role == self.role:
-            return f"同じ役割({self.role})の仲間が多い - 協調的に行動"
-        else:
-            return f"異なる役割({dominant_role})が優勢 - 独自性を保持"
-
-    def _calculate_separation(self, neighbor_actions: List[Dict[str, Any]]) -> str:
-        """分離ルールの計算"""
-        if len(neighbor_actions) < 2:
-            return "適切な間隔を保持"
-        
-        # 最近の発言の類似性をチェック（簡易実装）
-        recent_texts = [action.get("text", "") for action in neighbor_actions[-3:]]
-        
-        # 重複や類似性の簡易チェック
-        unique_texts = set(text.strip().lower() for text in recent_texts if text.strip())
-        
-        if len(unique_texts) < len(recent_texts) * 0.7:
-            return "発言の重複を検出 - より独創的な応答が必要"
-        else:
-            return "適切な発言の多様性を維持"
-
-    def _calculate_cohesion(self, neighbor_actions: List[Dict[str, Any]]) -> str:
-        """結束ルールの計算"""
-        if not neighbor_actions:
-            return "グループとの結束を構築する必要"
-        
-        # 会話の流れに参加しているかチェック
-        recent_topics = []
-        for action in neighbor_actions[-3:]:
-            text = action.get("text", "").lower()
-            if "質問" in text or "?" in text or "？" in text:
-                recent_topics.append("質問")
-            elif "回答" in text or "答" in text:
-                recent_topics.append("回答")
-            elif "批評" in text or "問題" in text or "改善" in text:
-                recent_topics.append("批評")
-        
-        if recent_topics:
-            dominant_topic = max(set(recent_topics), key=recent_topics.count)
-            return f"現在の会話トピック: {dominant_topic} - 建設的に参加"
-        else:
-            return "新しい話題を提起して会話を活性化"
-
+# Boids アルゴリズム関連メソッド have been moved to BoidsPromptEnhancer
 # ------------------------------------------------------------------
 # ユーティリティ関数
 # ------------------------------------------------------------------
