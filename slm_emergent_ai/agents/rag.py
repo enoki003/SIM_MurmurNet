@@ -10,8 +10,6 @@ import json
 import numpy as np
 from typing import Dict, List, Optional, Union, Any, Tuple
 
-from ...services.embedding_service import EmbeddingService # Added import
-
 class RAGBackend:
     """RAGのバックエンドインターフェース"""
     def __init__(self):
@@ -45,7 +43,6 @@ class ElasticSearchBackend(RAGBackend):
         self.es_url = es_url
         self.index_name = index_name
         self.client = None
-        self.embedding_service = EmbeddingService() # Instantiated EmbeddingService
         self._initialize()
     
     def _initialize(self):
@@ -88,8 +85,28 @@ class ElasticSearchBackend(RAGBackend):
         ドキュメントID
         """
         try:
-            # Generate embedding using the service
-            embedding = self.embedding_service.generate_embedding(text)
+            # テキストの埋め込みベクトルを計算
+            # 実際の実装では、sentence-transformersなどを使用
+            # フォールバック実装：TF-IDFベースの簡易ベクトル化
+            try:
+                words = text.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+
+                # 固定次元のベクトルを生成
+                embedding = [0.0] * 384
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    embedding[i] = float(word_freq[word])
+
+                # 正規化
+                norm = sum(x*x for x in embedding) ** 0.5
+                if norm > 0:
+                    embedding = [x/norm for x in embedding]
+            except Exception as e:
+                print(f"Error generating text embedding: {e}")
+                # 最後の手段としてゼロベクトル
+                embedding = [0.0] * 384
             
             # ドキュメントを追加
             response = self.client.index(
@@ -119,8 +136,28 @@ class ElasticSearchBackend(RAGBackend):
         検索結果のリスト
         """
         try:
-            # Generate query embedding using the service
-            query_embedding = self.embedding_service.generate_embedding(query)
+            # クエリの埋め込みベクトルを計算
+            # 実際の実装では、sentence-transformersなどを使用
+            # フォールバック実装：TF-IDFベースの簡易ベクトル化
+            try:
+                words = query.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+
+                # 固定次元のベクトルを生成
+                query_embedding = [0.0] * 384
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    query_embedding[i] = float(word_freq[word])
+
+                # 正規化
+                norm = sum(x*x for x in query_embedding) ** 0.5
+                if norm > 0:
+                    query_embedding = [x/norm for x in query_embedding]
+            except Exception as e:
+                print(f"Error generating query embedding: {e}")
+                # 最後の手段としてゼロベクトル
+                query_embedding = [0.0] * 384
             
             # ベクトル検索
             response = self.client.search(
@@ -189,7 +226,6 @@ class ChromaDBBackend(RAGBackend):
         self.persist_directory = persist_directory
         self.client = None
         self.collection = None
-        self.embedding_service = EmbeddingService() # Instantiated EmbeddingService
         self._initialize()
     
     def _initialize(self):
@@ -231,9 +267,28 @@ class ChromaDBBackend(RAGBackend):
             # ドキュメントIDを生成
             import uuid
             doc_id = str(uuid.uuid4())
+              # テキストの埋め込みベクトルを計算
+            # 実際の実装では、sentence-transformersなどを使用
+            # フォールバック実装：TF-IDFベースの簡易ベクトル化
+            try:
+                words = text.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
 
-            # Generate embedding using the service
-            embedding = self.embedding_service.generate_embedding(text)
+                # 固定次元のベクトルを生成
+                embedding = [0.0] * 384
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    embedding[i] = float(word_freq[word])
+
+                # 正規化
+                norm = sum(x*x for x in embedding) ** 0.5
+                if norm > 0:
+                    embedding = [x/norm for x in embedding]
+            except Exception as e:
+                print(f"Error generating text embedding: {e}")
+                # 最後の手段としてゼロベクトル
+                embedding = [0.0] * 384
             
             # ドキュメントを追加
             self.collection.add(
@@ -261,8 +316,28 @@ class ChromaDBBackend(RAGBackend):
         検索結果のリスト
         """
         try:
-            # Generate query embedding using the service
-            query_embedding = self.embedding_service.generate_embedding(query)
+            # クエリの埋め込みベクトルを計算
+            # 実際の実装では、sentence-transformersなどを使用
+            # フォールバック実装：TF-IDFベースの簡易ベクトル化
+            try:
+                words = query.lower().split()
+                word_freq = {}
+                for word in words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
+
+                # 固定次元のベクトルを生成
+                query_embedding = [0.0] * 384
+                for i, word in enumerate(sorted(word_freq.keys())[:384]):
+                    query_embedding[i] = float(word_freq[word])
+
+                # 正規化
+                norm = sum(x*x for x in query_embedding) ** 0.5
+                if norm > 0:
+                    query_embedding = [x/norm for x in query_embedding]
+            except Exception as e:
+                print(f"Error generating query embedding: {e}")
+                # 最後の手段としてゼロベクトル
+                query_embedding = [0.0] * 384
             
             # ベクトル検索
             results = self.collection.query(

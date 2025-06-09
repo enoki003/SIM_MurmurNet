@@ -2,7 +2,7 @@
 
 ## 概要
 
-SLM Emergent AIは、Small Language Model (SLM, ≤ 1B params)を複数体協調させ、Boidsアルゴリズムに触発されたプロンプトエンジニアリングとブラックボード共有メモリを活用し、中央制御なしの創発知能を実証するシステムです。エージェントの行動は `BoidsPromptEnhancer` を通じて誘導され、LLMへの入力プロンプトが調整されます。
+SLM Emergent AIは、Small Language Model (SLM, ≤ 1B params)を複数体協調させ、Boidsアルゴリズム由来の局所ルールとブラックボード共有メモリのみで中央制御なしの創発知能を実証するシステムです。
 
 このプロジェクトは設計書に基づいて実装されており、gemma3:1bモデルを使用して複数のエージェントが協調的に動作します。
 
@@ -34,16 +34,6 @@ pip install -r requirements.txt
 4. （オプション）モデルを量子化します
 ```bash
 ./scripts/quantize.sh gemma3:1b q4
-```
-
-## テスト (Testing)
-
-本プロジェクトにはユニットテストが含まれています。テストは、コアエージェントロジック、メトリック計算、エンベディングサービス、Boidsプロンプトエンハンスメントなどを対象としています。
-
-すべてのユニットテストを実行するには、リポジトリのルートディレクトリから以下のコマンドを実行してください:
-
-```bash
-./run_all_tests.py
 ```
 
 ## 使用方法
@@ -91,7 +81,6 @@ slm_emergent_ai/
 ├── scripts/            # bash helpers (download, convert‑gguf)
 │   ├── dl_model.sh
 │   └── quantize.sh
-├── run_all_tests.py    # Add this line - Test execution script
 └── slm_emergent_ai/
     ├── __init__.py
     ├── run_sim.py
@@ -105,17 +94,14 @@ slm_emergent_ai/
     ├── agents/
     │   ├── core.py
     │   ├── rag.py
-    │   ├── memory_agent.py
-    │   └── boids_enhancer.py # Add this line - Boids prompt enhancement logic
-    ├── boids/  # This directory might be less central now, or removed if all logic moved
+    │   └── memory_agent.py
+    ├── boids/
     │   ├── rules.py
     │   └── processor.py
     ├── memory/
     │   ├── blackboard.py
     │   ├── db_sqlite.py 
     │   └── db_redis.py 
-    ├── services/           # Add this section - Centralized services
-    │   └── embedding_service.py
     ├── eval/
     │   ├── metrics.py
     │   ├── plot.py     
@@ -130,22 +116,19 @@ slm_emergent_ai/
         ├── test_boids.py 
         ├── test_blackboard.py 
         ├── test_metrics.py
-        ├── test_embedding_service.py # Add this line
-        └── test_boids_enhancer.py  # Add this line
         └── perf/
             └── bench_10agents.py 
 ```
 
 ## 主要コンポーネント
 
-1. **SLMAgent**: Small Language Modelエージェント。`BoidsPromptEnhancer` から提供されるガイダンスに基づきプロンプトを調整して応答します。
-2. **BlackBoard**: エージェント間の共有メモリ。`EmbeddingService` を利用してメッセージのベクトル表現を管理することがあります。
-3. **MetaController**: λパラメータの自動調整。
-4. **BoidsPromptEnhancer**: Boidsアルゴリズム（整列、結合、分離）の原則に基づき、エージェントのプロンプトを強化して協調行動を促進します。
-5. **EmbeddingService**: テキストデータのベクトル埋め込みを生成する中央集権的なサービス。
-6. **RAG**: 長期記憶のためのRetrieval Augmented Generation。`EmbeddingService` を利用します。
-7. **Metrics**: エントロピー、VDI、FCR、速度などの評価指標。
-8. **UI Dashboard**: リアルタイムモニタリングとコントロール。
+1. **SLMAgent**: Small Language Modelエージェント
+2. **BlackBoard**: エージェント間の共有メモリ
+3. **MetaController**: λパラメータの自動調整
+4. **Boids Rules**: 整列、結合、分離の3つの基本ルール
+5. **RAG**: 長期記憶のためのRetrieval Augmented Generation
+6. **Metrics**: エントロピー、VDI、FCR、速度などの評価指標
+7. **UI Dashboard**: リアルタイムモニタリングとコントロール
 
 ## 注意事項
 

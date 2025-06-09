@@ -677,24 +677,38 @@ class Dashboard:
                         # トークン番号だけの場合は除外
                         if len(text.strip()) < 3:
                             continue
-                            
-                        # エージェント表示名のフォーマット
-                        display_name = role if role != f'Agent_{agent_id}' else f'Agent {agent_id}'
                         
+                        # New display_name logic:
+                        agent_id_num = msg.get('agent_id') # Original numeric ID
+                        agent_name_from_msg = msg.get('agent_name') # e.g., "Agent_1"
+
+                        # Prioritize agent_name if available, otherwise construct generic from agent_id
+                        if agent_name_from_msg:
+                            display_name = agent_name_from_msg
+                        elif agent_id_num is not None:
+                            display_name = f"Agent {agent_id_num}"
+                        else:
+                            display_name = f"Agent_{i}" # Fallback if no id or name in msg
+
                         formatted_messages.append({
-                            'agent_id': display_name,
-                            'text': text,
+                            'agent_id': display_name, # This is what's shown in the UI's "Agent X:" prefix
+                            'text': text, # text variable already defined above
                             'timestamp': msg.get('timestamp', '')
                         })
                     else:
-                        # メッセージが文字列の場合
+                        # メッセージが文字列の場合 (non-dict message)
                         if isinstance(msg, str) and len(msg.strip()) > 3:
                             # トークン番号だけの文字列は除外
                             if msg.startswith('token_') and len(msg) < 20:
                                 continue
                                 
+                            # For non-dict messages, use a generic identifier or index
+                            # The old version used `i % 5 + 1` which implies a fixed number of agents.
+                            # A simple index `i` might be better if the number of agents can vary.
+                            # Or, if non-dict messages are unexpected, log them or handle as 'Unknown'.
+                            display_name_for_non_dict = f"Entry {i}" # Or "Unknown Source"
                             formatted_messages.append({
-                                'agent_id': f'Agent {i % 5 + 1}',  # 5つのエージェントIDを循環
+                                'agent_id': display_name_for_non_dict,
                                 'text': str(msg),
                                 'timestamp': ''
                             })

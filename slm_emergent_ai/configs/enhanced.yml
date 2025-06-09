@@ -7,11 +7,7 @@ agent:
   n: 5
   max_turns: 15
   roles:
-    - "研究者"
-    - "分析者"
-    - "創造者"
-    - "批評者"
-    - "統合者"
+    - "Agent" # Simplified to a single, generic role
 
 lambda:
   a: 0.4

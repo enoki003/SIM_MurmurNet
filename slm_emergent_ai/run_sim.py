@@ -88,45 +88,26 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901  (長い
     agent_count: int = config.get("agent", {}).get("n", 3)
     agents: List[SLMAgent] = []
 
-    # λ パラメータ
-    lambda_params: Dict[str, float] = {
-        "λ_a": config.get("lambda", {}).get("a", 0.3),
-        "λ_c": config.get("lambda", {}).get("c", 0.3),
-        "λ_s": config.get("lambda", {}).get("s", 0.1),
-    }
-
-    # BlackBoard へ λ パラメータ反映
-    for key, value in lambda_params.items():
-        await bb.set_param(key, value)
-
-    await bb.set_param("base_speed", 10.0)
+    # λ パラメータ (lambda_params) are now considered obsolete and removed.
+    # The associated config section "lambda" in YAML files is also obsolete.
+    # await bb.set_param("base_speed", 10.0) # This can remain if it's a general simulation parameter
 
     print(f"Initializing {agent_count} agents...")
 
-    roles: List[str] = config.get("agent", {}).get(
-        "roles", ["質問者", "回答者", "批評者"]
-    )
-    agent_names: List[str] = [
-        "アリス",
-        "ボブ",
-        "キャロル",
-        "デイブ",
-        "イブ",
-        "フランク",
-    ]
+    # Roles are now simplified in config (e.g., roles: ["Agent"])
+    roles: List[str] = config.get("agent", {}).get("roles", ["Agent"])
 
+    # Agent names are now generic
     for i in range(agent_count):
-        role = roles[i % len(roles)]
-        name = agent_names[i] if i < len(agent_names) else f"Agent{i + 1}"
+        role = roles[i % len(roles)] # All agents will get the same role if roles list has 1 element
+        name = f"Agent_{i+1}" # Generic name assignment
         agent = SLMAgent(
             id=i + 1,
             role=role,
             model=model,
-            tokenizer=model.tokenizer, # model is an instance of LLM, which should have a tokenizer attribute
-            λ=lambda_params,
+            tokenizer=model.tokenizer,
+            # λ=lambda_params, # Removed obsolete lambda_params
             name=name,
-            blackboard=bb,  # Pass the blackboard instance
-            boids_config=config.get("boids_enhancer", {}) # Pass boids specific config
         )
         agents.append(agent)
         print(f"[DEBUG] Agent {i + 1} ({name}) initialized with role: {role}")
@@ -199,103 +180,77 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901  (長い
     # ------------------------------------------------------------------
     # メトリクス更新ループ
     # ------------------------------------------------------------------
+    # Note: The metrics_update_loop previously might have logged lambda params from current_metrics.
+    # Since lambda_params are removed from agents and blackboard (for boids), ensure this loop
+    # or MetricsTracker doesn't critically depend on them if they were being sourced from there.
+    # The current metrics_tracker.update_lambda was for values present in `current_metrics` dict,
+    # which was populated from blackboard or other sources, not directly from agent's lambda.
+    # This part seems fine as update_lambda is conditional.
     async def metrics_update_loop() -> None:
-        nonlocal step_counter, simulation_logs, model, metrics_tracker, bb  # Ensure model and metrics_tracker are in scope
-        total_tokens_generated_so_far = 0 # Initialize total tokens
+        nonlocal step_counter, simulation_logs, model, metrics_tracker, bb # Added model, metrics_tracker, bb
+        total_tokens_generated_so_far = 0 # Assuming this was added in a previous step for speed metrics
 
         while True:
-            await asyncio.sleep(2)  # 2 秒間隔 (configurable metric update interval)
+            await asyncio.sleep(2)  # 2 秒間隔
             step_counter += 1
 
-            # --- Data Collection ---
-            # For VDI: Aggregate tokens from recent messages
-            # For Speed: Aggregate all tokens generated so far
-            all_messages_raw = await bb.pull_messages_raw(k=-1) # Get all messages for token count and VDI
+            all_messages_raw = await bb.pull_messages_raw(k=-1) # Fetch all for VDI / Speed
 
-            all_texts_for_vdi = []
+            # VDI and Speed data collection (assuming from a previous merge/update)
             current_total_tokens = 0
-            processed_texts_for_vdi = []
+            vdi_tokens = []
+            active_tokenizer = model.tokenizer
+            for msg in all_messages_raw:
+                if isinstance(msg, dict) and "text" in msg:
+                    text_content = msg.get("text", "")
+                    if active_tokenizer:
+                        current_total_tokens += len(active_tokenizer.encode(text_content))
+                    else:
+                        current_total_tokens += len(text_content.split())
 
-            if model.tokenizer: # Check if tokenizer is available
-                for msg in all_messages_raw:
-                    if isinstance(msg, dict) and "text" in msg:
-                        text_content = msg.get("text", "")
-                        # For VDI, use tokens from recent messages (e.g., last 20 as before, or a configurable number)
-                        # For simplicity here, let's use text from all_messages_raw for VDI calculation for now
-                        # but ideally, this should be from a more focused window.
-                        processed_texts_for_vdi.append(text_content)
-                        current_total_tokens += len(model.tokenizer.encode(text_content))
-
-                # Aggregate tokens from recent messages for VDI
-                # Using last N messages for VDI calculation, let's say last 50 messages or 1000 tokens.
-                # The current calculate_vdi takes a list of tokens and a window_size for *that list*.
-                # So we need to provide a list of tokens from recent messages.
-
-                # Let's collect tokens from the last 20 messages for VDI as it was somewhat implied by original code.
-                recent_messages_for_vdi_calc = all_messages_raw[-20:]
-                vdi_texts = [msg.get("text", "") for msg in recent_messages_for_vdi_calc if isinstance(msg, dict)]
-                vdi_tokens = []
-                for text_content in vdi_texts:
-                    vdi_tokens.extend(model.tokenizer.encode(text_content))
-
-            else: # Fallback if tokenizer is not available (e.g. simple char/word count)
-                for msg in all_messages_raw:
-                    if isinstance(msg, dict) and "text" in msg:
-                        text_content = msg.get("text", "")
-                        processed_texts_for_vdi.append(text_content)
-                        current_total_tokens += len(text_content.split()) # simple word count
-
-                recent_messages_for_vdi_calc = all_messages_raw[-20:]
-                vdi_texts = [msg.get("text", "") for msg in recent_messages_for_vdi_calc if isinstance(msg, dict)]
-                # Simple tokenization for VDI if no tokenizer
-                vdi_tokens = [word for text_content in vdi_texts for word in text_content.split()]
-
+            recent_messages_for_vdi_calc = all_messages_raw[-20:]
+            vdi_texts = [msg.get("text", "") for msg in recent_messages_for_vdi_calc if isinstance(msg, dict)]
+            for text_content in vdi_texts:
+                if active_tokenizer:
+                    vdi_tokens.extend(active_tokenizer.encode(text_content))
+                else:
+                    vdi_tokens.extend(text_content.split())
 
             total_tokens_generated_so_far = current_total_tokens
+            fact_check_results = [] # Placeholder for FCR
 
-            # For FCR: Pass an empty list (placeholder)
-            fact_check_results = []
+            # Metric Calculation
+            from .eval.metrics import calculate_vdi, calculate_fcr # Ensure imports if not at top
+            vdi_value = calculate_vdi(vdi_tokens)
+            fcr_value = calculate_fcr(fact_check_results)
 
-            # For Entropy: No probability distribution source, so pass default or skip.
-            # We will call metrics_tracker.update_entropy(0.0) directly.
-
-            # --- Metric Calculation ---
-            vdi_value = calculate_vdi(vdi_tokens) # calculate_vdi is imported from metrics.py
-            fcr_value = calculate_fcr(fact_check_results) # calculate_fcr is imported
-
-            # --- Tracker Updates ---
+            # Tracker Updates
             metrics_tracker.update_vdi(vdi_value)
             metrics_tracker.update_fcr(fcr_value)
-            metrics_tracker.update_entropy(0.0) # Default value for entropy
-            metrics_tracker.update_token_count(total_tokens_generated_so_far) # This will trigger speed calculation
+            metrics_tracker.update_entropy(0.0) # Placeholder for entropy
+            metrics_tracker.update_token_count(total_tokens_generated_so_far) # For speed
 
-            # Logging (similar to before, but can now include new metrics from tracker)
-            agent_responses = {
+            # Logging step_log
+            agent_responses_log = { # Renamed to avoid conflict if agent_responses used elsewhere
                 msg.get("agent_id", 0): msg.get("text", "")
-                for msg in all_messages_raw[-3:] # Use all_messages_raw to get latest
+                for msg in all_messages_raw[-3:] # Example: log last 3 messages
                 if isinstance(msg, dict)
             }
             step_log = {
-                "step": step_counter,
-                "timestamp": time.strftime("%H:%M:%S"),
-                "agent_responses": agent_responses,
-                "total_messages": len(all_messages_raw),
-                "calculated_vdi": vdi_value,
-                "calculated_fcr": fcr_value,
+                "step": step_counter, "timestamp": time.strftime("%H:%M:%S"),
+                "agent_responses": agent_responses_log, "total_messages": len(all_messages_raw),
+                "calculated_vdi": vdi_value, "calculated_fcr": fcr_value,
                 "total_tokens_for_speed": total_tokens_generated_so_far,
                 "current_speed": metrics_tracker.current_metrics.get('speed', 0.0)
             }
             simulation_logs.append(step_log)
 
             if eval_enabled and step_counter % eval_freq == 0:
-                # The old current_metrics dict is mostly replaced by direct calculations and tracker updates
-                # We can log the metrics tracker's current state
                 current_tracked_metrics = metrics_tracker.get_current_metrics()
-                print(f"[METRICS] Step {step_counter}: {current_tracked_metrics}")
-                # Lambda parameters are updated by the controller, not directly here.
-                # If lambda params were part of current_metrics before, ensure controller still updates them in blackboard.
-                # The metrics_tracker has update_lambda, but it should be called by controller if it changes them.
-
+                # Remove lambda params from logging if they were part of current_tracked_metrics and no longer exist
+                lambda_keys_to_remove = ['λ_a', 'λ_c', 'λ_s']
+                logged_metrics = {k: v for k, v in current_tracked_metrics.items() if k not in lambda_keys_to_remove}
+                print(f"[METRICS] Step {step_counter}: {logged_metrics}")
 
     metrics_task = asyncio.create_task(metrics_update_loop())
 

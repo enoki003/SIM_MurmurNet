@@ -11,9 +11,7 @@ agent:
   n: 3               # エージェント数
   max_turns: 10      # 最大ターン数
   roles:             # エージェントの役割
-    - "質問者"
-    - "回答者"
-    - "批評者"
+    - "Agent"        # Simplified to a single, generic role
 
 lambda:
   a: 0.3             # 整列ルールの重み
@@ -52,6 +50,8 @@ evaluation:
 
 prompts:
   initial:           # 初期プロンプト
-    - "あなたは質問者です。"
-    - "あなたは回答者です"
-    - "あなたは批判者です"
+    - "あなたは質問者です。" # These prompts might need generalization if roles are generic
+    - "あなたは回答者です"   # or the role-specific instructions in SLMAgent._build_role_specific_prompt
+    - "あなたは批判者です"   # should be made generic. For now, only changing roles list.
+
+```
