@@ -1,13 +1,12 @@
 """
-BlackBoardの拡張 - トピックサマリー取得メソッドの追加
-
-プロンプトエンジニアリング方式のBoids制御に必要な
-トピックサマリー取得メソッドを追加
+BlackBoard: Shared memory for agents, supporting different backends (SQLite, Redis)
+and managing a topic summary. The summary previously involved TF-IDF like embeddings,
+which have now been replaced with zero vectors.
 """
 
 import asyncio
-import json
-import time
+# import json # Removed unused import
+# import time # Removed unused import
 from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
@@ -16,64 +15,69 @@ from .db_redis import RedisBackend
 
 class BlackBoard:
     """
-    エージェント間の共有メモリを提供するブラックボード
-    
-    ローカルモードではSQLiteBackendを使用し、分散モードではRedisBackendを使用する
+    Provides shared memory for agents (エージェント間の共有メモリを提供するブラックボード).
+    Uses SQLiteBackend for local mode and RedisBackend for distributed mode.
+    Manages messages and a topic summary (currently with zero vector embeddings).
     """
-    def __init__(self, mode: str = "local", redis_url: Optional[str] = None, backend=None):
+    def __init__(self, mode: str = "local", redis_url: Optional[str] = None, backend: Optional[Any] = None):
         """
-        BlackBoardの初期化
+        Initializes the BlackBoard. (BlackBoardの初期化)
         
         Parameters:
         -----------
-        mode: 動作モード ("local" または "distributed")
-        redis_url: Redisサーバーの接続URL (分散モード時のみ使用)
-        backend: 外部から提供されるバックエンド（テスト用）
+        mode: str
+            動作モード ("local" または "distributed") - Operating mode.
+        redis_url: Optional[str]
+            Redisサーバーの接続URL (分散モード時のみ使用) - Redis server URL (used in distributed mode only).
+        backend: Optional[Any]
+            外部から提供されるバックエンド（テスト用）- External backend for testing.
         """
         self.mode = mode
         self.redis_url = redis_url
-        self.backend = backend
-        self.summary_vec = np.zeros(384)  # 埋め込みベクトルの次元数
+        self.backend: Any = backend # Type set to Any to accommodate different backend types
+        self.summary_vec: np.ndarray = np.zeros(384, dtype=np.float32)  # Default embedding dimension and type
+
         if backend is None:
             self._initialize()
     
     def _initialize(self):
-        """バックエンドの初期化"""
+        """Initializes the backend storage (SQLite or Redis). (バックエンドの初期化)"""
         if self.mode == "local":
-            # ローカルモード: SQLiteBackendを使用
-            self.backend = SQLiteBackend(":memory:")
-        else:
-            # 分散モード: RedisBackendを使用
+            self.backend = SQLiteBackend(":memory:") # Use in-memory SQLite for local mode
+        elif self.mode == "distributed":
+            if not self.redis_url:
+                raise ValueError("Redis URL must be provided for distributed mode.")
             self.backend = RedisBackend(self.redis_url)
+        else:
+            raise ValueError(f"Unknown BlackBoard mode: {self.mode}")
     
     async def push(self, message: Union[Dict[str, Any], int, str], text: Optional[str] = None) -> bool:
         """
-        メッセージをブラックボードに追加
+        Adds a message to the blackboard. (メッセージをブラックボードに追加)
         
         Parameters:
         -----------
-        message: メッセージデータ（辞書）または従来のagent_id
-        text: メッセージテキスト（messageが辞書でない場合に使用）
+        message: Union[Dict[str, Any], int, str]
+            メッセージデータ（辞書）または従来のagent_id - Message data (dictionary) or legacy agent_id.
+        text: Optional[str]
+            メッセージテキスト（messageが辞書でない場合に使用）- Message text (used if 'message' is not a dict).
         
         Returns:
         --------
-        成功したかどうか
+        bool: 成功したかどうか - True if successful, False otherwise.
         """
         try:
             if isinstance(message, dict):
-                # 新しいフォーマット：辞書型のメッセージ
-                agent_id = message.get("agent_id", 0)
+                agent_id = message.get("agent_id", 0) # Default agent_id if not provided
                 msg_text = message.get("text", "")
                 result = self.backend.push_message(agent_id, msg_text, message)
-            else:
-                # 従来のフォーマット：agent_id + text
-                agent_id = message
-                msg_text = text or ""
-                result = self.backend.push_message(agent_id, msg_text)
+            else: # Legacy format
+                agent_id = message # Here, message is agent_id
+                msg_text = text if text is not None else ""
+                result = self.backend.push_message(agent_id, msg_text) # Pass full message structure if needed by backend
             
-            # 非同期で要約を更新
+            # Schedule summary update (non-blocking)
             asyncio.create_task(self._update_summary())
-            
             return result
         except Exception as e:
             print(f"Error pushing to BlackBoard: {e}")
@@ -81,28 +85,25 @@ class BlackBoard:
     
     async def pull(self, k: int = 16) -> List[str]:
         """
-        最新のk件のメッセージを取得
+        Retrieves the latest k messages (text content only). (最新のk件のメッセージを取得)
         
         Parameters:
         -----------
-        k: 取得するメッセージ数
+        k: int
+            取得するメッセージ数 - Number of messages to retrieve.
         
         Returns:
         --------
-        メッセージのリスト（文字列形式）
+        List[str]: メッセージのリスト（文字列形式）- List of messages (text content).
         """
         try:
             raw_messages = self.backend.pull_messages(k)
-            text_messages = []
-            
-            for msg in raw_messages:
-                if isinstance(msg, dict):
-                    # 辞書の場合は 'text' フィールドを抽出
-                    text_messages.append(str(msg.get('text', '')))
+            text_messages: List[str] = []
+            for msg_data in raw_messages: # Renamed msg to msg_data
+                if isinstance(msg_data, dict):
+                    text_messages.append(str(msg_data.get('text', '')))
                 else:
-                    # 文字列の場合はそのまま使用
-                    text_messages.append(str(msg))
-            
+                    text_messages.append(str(msg_data)) # Should ideally be dicts from backend
             return text_messages
         except Exception as e:
             print(f"Error pulling from BlackBoard: {e}")
@@ -110,195 +111,176 @@ class BlackBoard:
     
     async def pull_messages_raw(self, k: int = 16) -> List[Dict[str, Any]]:
         """
-        最新のk件のメッセージを辞書形式で取得（ダッシュボード用）
-        
+        Retrieves the latest k messages as raw dictionaries. (最新のk件のメッセージを辞書形式で取得)
+        Used by components like the dashboard that need full message data.
+
         Parameters:
         -----------
-        k: 取得するメッセージ数
+        k: int
+            取得するメッセージ数 - Number of messages to retrieve.
         
         Returns:
         --------
-        メッセージの辞書リスト
+        List[Dict[str, Any]]: メッセージの辞書リスト - List of message dictionaries.
         """
         try:
-            return self.backend.pull_messages(k)
+            return self.backend.pull_messages(k) # Backend should return List[Dict[str, Any]]
         except Exception as e:
             print(f"Error pulling raw messages from BlackBoard: {e}")
             return []
     
-    async def _update_summary(self, method: str = "minilm", window: int = 64):
+    async def _update_summary(self, window: int = 64):
         """
-        トピックサマリーを更新
+        Updates the topic summary. (トピックサマリーを更新)
+        The summary consists of a concatenated text snippet from recent messages
+        and a zero vector representation (as actual embedding is disabled).
         
         Parameters:
         -----------
-        method: 要約に使用するモデル
-        window: 要約対象の最新メッセージ数
+        window: int
+            The number of recent messages (text content) to consider for the textual part of the summary.
         """
         try:
-            # 最新のwindow件のメッセージを取得（文字列のリスト）
-            messages = await self.pull(window)
-            if not messages:
+            messages_texts = await self.pull(window) # Gets list of strings
+            if not messages_texts:
                 return
             
-            # メッセージを結合
-            text = " ".join(messages)
-              # 実際の埋め込みベクトルサービスが利用できない場合のフォールバック
-            # 実際の実装では、sentence-transformersなどを使用して埋め込みベクトルを計算
-            try:
-                # 簡単なTF-IDFベースの代替実装（実際のサービスが利用できない場合）
-                words = text.lower().split()
-                word_freq = {}
-                for word in words:
-                    word_freq[word] = word_freq.get(word, 0) + 1
-
-                # 固定次元のベクトルを生成（単語頻度ベース）
-                vector = np.zeros(384)
-                for i, word in enumerate(sorted(word_freq.keys())[:384]):
-                    vector[i] = word_freq[word]
-
-                # 正規化
-                norm = np.linalg.norm(vector)
-                if norm > 0:
-                    vector = vector / norm
-                else:
-                    # 空のテキストの場合はゼロベクトル
-                    vector = np.zeros(384)
-            except Exception as e:
-                print(f"Error generating text embedding: {e}")
-                # 最後の手段として、ゼロベクトルを使用
-                vector = np.zeros(384)
+            concatenated_text = " ".join(messages_texts)
             
-            # 要約を保存
-            self.backend.save_summary(text[:200], vector)
+            # Embedding generation removed, using zero vector.
+            vector_dim = self.summary_vec.shape[0] if self.summary_vec is not None else 384
+            current_dtype = self.summary_vec.dtype if self.summary_vec is not None else np.float32
+            vector = np.zeros(vector_dim, dtype=current_dtype)
             
-            # 要約ベクトルを更新
-            self.summary_vec = vector
+            # Save the textual part of the summary (first 200 chars) and the zero vector.
+            self.backend.save_summary(concatenated_text[:200], vector)
+            self.summary_vec = vector # Update in-memory summary vector
             
         except Exception as e:
             print(f"Error updating summary: {e}")
     
     async def set_param(self, key: str, value: Any) -> bool:
         """
-        KVストアにパラメータを設定
+        Sets a parameter in the backend's key-value store. (KVストアにパラメータを設定)
         
         Parameters:
         -----------
-        key: キー
-        value: 値
+        key: str
+            キー - The key for the parameter.
+        value: Any
+            値 - The value of the parameter.
         
         Returns:
         --------
-        成功したかどうか
+        bool: 成功したかどうか - True if successful, False otherwise.
         """
         try:
             return self.backend.set_param(key, value)
         except Exception as e:
-            print(f"Error setting parameter: {e}")
+            print(f"Error setting parameter '{key}': {e}")
             return False
     
     async def get_param(self, key: str, default: Any = None) -> Any:
         """
-        KVストアからパラメータを取得
+        Retrieves a parameter from the backend's key-value store. (KVストアからパラメータを取得)
         
         Parameters:
         -----------
-        key: キー
-        default: デフォルト値
+        key: str
+            キー - The key for the parameter.
+        default: Any
+            デフォルト値 - Default value to return if the key is not found.
         
         Returns:
         --------
-        値
+        Any: 値 - The value of the parameter or the default.
         """
+        print(f"[METRICS_DEBUG] BlackBoard.get_param called for key: {key}") # Adding requested debug print
         try:
-            return self.backend.get_param(key, default)
+            value = self.backend.get_param(key, default)
+            print(f"[METRICS_DEBUG] BlackBoard.get_param for '{key}' returned: {value}") # Also log returned value
+            return value
         except Exception as e:
-            print(f"Error getting parameter: {e}")
+            print(f"Error getting parameter '{key}': {e}")
             return default
     
-    async def update_summary(self, summary: str, vector: np.ndarray) -> bool:
+    async def update_summary(self, summary_text: str, vector: np.ndarray) -> bool: # Renamed summary to summary_text
         """
-        トピックサマリーを直接更新
+        Directly updates the topic summary text and vector. (トピックサマリーを直接更新)
         
         Parameters:
         -----------
-        summary: 要約テキスト
-        vector: 埋め込みベクトル
+        summary_text: str
+            要約テキスト - The new summary text.
+        vector: np.ndarray
+            埋め込みベクトル - The new embedding vector.
         
         Returns:
         --------
-        成功したかどうか
+        bool: 成功したかどうか - True if successful, False otherwise.
         """
         try:
-            result = self.backend.save_summary(summary, vector)
-            
-            # 要約ベクトルを更新
-            self.summary_vec = vector.copy()
-            
+            result = self.backend.save_summary(summary_text, vector)
+            if result:
+                self.summary_vec = vector.copy() # Update in-memory vector if save was successful
             return result
         except Exception as e:
-            print(f"Error updating summary: {e}")
+            print(f"Error updating summary directly: {e}")
             return False
     
     async def clear_all(self) -> bool:
         """
-        すべてのデータをクリア
+        Clears all data from the blackboard (messages, summary, params). (すべてのデータをクリア)
         
         Returns:
         --------
-        成功したかどうか
+        bool: 成功したかどうか - True if successful, False otherwise.
         """
         try:
             result = self.backend.clear_all()
-            
-            # 要約ベクトルをリセット
-            self.summary_vec = np.zeros(384)
-            
+            if result:
+                # Reset in-memory summary vector as well
+                self.summary_vec = np.zeros_like(self.summary_vec)
             return result
         except Exception as e:
             print(f"Error clearing BlackBoard: {e}")
             return False
     
-    def get_topic_summary(self) -> str:
+    def get_topic_summary(self, max_words: int = 30) -> str:
         """
-        現在のトピックサマリーを取得（プロンプトエンジニアリング用）
+        Retrieves the current textual topic summary. (現在のトピックサマリーを取得)
+        If no summary is stored, it generates a simple one from recent messages.
+
+        Args:
+            max_words (int): The maximum number of words for the returned summary.
 
         Returns:
-        --------
-        トピックサマリー文字列
+            str: The topic summary string, potentially truncated.
         """
+        summary_text_to_return = "" # Renamed to avoid conflict
         try:
-            # 最新のサマリー情報を取得
-            summary_info = self.backend.get_latest_summary()
+            summary_info = self.backend.get_latest_summary() # This should return {'summary': str, 'vector': np.ndarray}
             
-            if summary_info and "summary" in summary_info:
-                return summary_info["summary"]
-
-            # サマリーがない場合は、最新のメッセージから簡易的に生成
-            raw_messages = self.backend.pull_messages(10)  # 最新の10件のメッセージを取得
-
-            if not raw_messages:
-                return ""
-
-            # メッセージを文字列形式に変換
-            text_messages = []
-            for msg in raw_messages:
-                if isinstance(msg, dict):
-                    # 辞書の場合は 'text' フィールドを抽出
-                    text_messages.append(str(msg.get('text', '')))
-                else:
-                    # 文字列の場合はそのまま使用
-                    text_messages.append(str(msg))
-
-            # 簡易的な要約（実際の実装ではより高度な要約技術を使用）
-            words = " ".join(text_messages).split()
-            if len(words) > 30:
-                summary = " ".join(words[:30]) + "..."
+            if summary_info and "summary" in summary_info and summary_info["summary"]:
+                summary_text_to_return = summary_info["summary"]
             else:
-                summary = " ".join(words)
+                # Fallback: generate a simple summary from the last 10 messages (text only)
+                raw_messages_texts = asyncio.run(self.pull(k=10)) # pull returns List[str]
+                if not raw_messages_texts:
+                    return "" # No messages, no summary
+                summary_text_to_return = " ".join(raw_messages_texts)
+
+            # Truncate the summary to max_words
+            words = summary_text_to_return.split()
+            if len(words) > max_words:
+                concise_summary = " ".join(words[:max_words]) + "..."
+            else:
+                concise_summary = " ".join(words)
             
-            return summary
+            return concise_summary.strip()
             
         except Exception as e:
             print(f"Error getting topic summary: {e}")
             return ""
+
+```

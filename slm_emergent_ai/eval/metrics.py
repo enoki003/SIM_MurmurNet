@@ -132,21 +132,25 @@ class MetricsTracker:
     
     def update_entropy(self, entropy: float):
         """エントロピーを更新"""
+        print(f"[METRICS_DEBUG] MetricsTracker.update_entropy received: {entropy}")
         self.current_metrics['entropy'] = entropy
         self.metrics_history['entropy'].append(entropy)
     
     def update_vdi(self, vdi: float):
         """VDIを更新"""
+        print(f"[METRICS_DEBUG] MetricsTracker.update_vdi received: {vdi}")
         self.current_metrics['vdi'] = vdi
         self.metrics_history['vdi'].append(vdi)
     
     def update_fcr(self, fcr: float):
         """FCRを更新"""
+        print(f"[METRICS_DEBUG] MetricsTracker.update_fcr received: {fcr}")
         self.current_metrics['fcr'] = fcr
         self.metrics_history['fcr'].append(fcr)
     
     def update_speed(self, speed: float):
         """速度を更新"""
+        print(f"[METRICS_DEBUG] MetricsTracker.update_speed received: {speed}")
         self.current_metrics['speed'] = speed
         self.metrics_history['speed'].append(speed)
     
@@ -158,6 +162,7 @@ class MetricsTracker:
     
     def update_token_count(self, count: int):
         """トークン数を更新"""
+        print(f"[METRICS_DEBUG] MetricsTracker.update_token_count received: {count}")
         self.token_counts.append(count)
         self.times.append(time.time())
         

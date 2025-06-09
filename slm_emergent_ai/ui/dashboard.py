@@ -12,37 +12,17 @@ from typing import Dict, List, Any, Optional
 
 # Import BlackBoard if it exists in another module
 try:
-    # Attempt to import BlackBoard; fallback to placeholder if unavailable
-    try:
-        from some_module import BlackBoard
-    except ImportError:
-        # Define a placeholder BlackBoard class if not available
-        class BlackBoard:
-            async def get_param(self, key: str, default: Any) -> Any:
-                return default
-
-            async def pull(self, k: int) -> List[Dict[str, Any]]:
-                return []
-
-            async def push(self, message: Dict[str, Any]) -> None:
-                pass
-
-            async def pull_messages_raw(self, k: int) -> List[Dict[str, Any]]:
-                return []
+    from ..memory.blackboard import BlackBoard  # Corrected import
 except ImportError:
-    # Define a placeholder BlackBoard class if not available
+    # Fallback BlackBoard definition for standalone UI testing or if main module is not in PYTHONPATH
+    print("[Dashboard WARNING] Actual BlackBoard class not found, using placeholder for UI.")
     class BlackBoard:
-        async def get_param(self, key: str, default: Any) -> Any:
-            return default
+        """Placeholder BlackBoard class for UI when the main module is not accessible."""
+        async def get_param(self, key: str, default: Any) -> Any: return default
+        async def pull(self, k: int) -> List[Dict[str, Any]]: return []
+        async def push(self, message: Dict[str, Any]) -> None: pass
+        async def pull_messages_raw(self, k: int) -> List[Dict[str, Any]]: return []
 
-        async def pull(self, k: int) -> List[Dict[str, Any]]:
-            return []
-
-        async def push(self, message: Dict[str, Any]) -> None:
-            pass
-
-        async def pull_messages_raw(self, k: int) -> List[Dict[str, Any]]:
-            return []
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -540,11 +520,13 @@ class Dashboard:
         try:
             message = json.loads(data)
             if message.get("type") == "subscribe":
-                # 購読チャンネルを処理
                 channel = message.get("channel")
                 print(f"Client subscribed to channel: {channel}")
+            elif message.get("type") == "metrics": # Assuming metrics are pushed via WebSocket
+                print(f"[METRICS_DEBUG] Dashboard WebSocket received metrics: {message.get('data')}")
+                # This part would then update the Vue app's metrics ref,
+                # which is already handled by the Vue code if it receives 'metrics' type messages.
             elif message.get("type") == "inject":
-                # プロンプト注入を処理
                 prompt = message.get("prompt")
                 await self._inject_prompt(prompt)
         except Exception as e:
@@ -552,38 +534,41 @@ class Dashboard:
     
     async def _fetch_metrics(self) -> Dict[str, Any]:
         """メトリクスを取得"""
+        # This method is called by an API endpoint and by internal polling in Vue (fetchData).
+        # It should ideally fetch from a single source of truth, e.g., MetricsTracker via BlackBoard.
+        metrics_to_return = {}
         try:
-            # BlackBoardからメトリクスを取得
             if self.bb:
-                # BlackBoardからパラメータを直接取得
+                # Attempt to get consolidated metrics from a single source if possible
+                # For now, continue with individual param fetching as per existing logic
+                # but this is where it could be simplified if MetricsTracker posts its full dict to bb.
                 try:
-                    # λパラメータを取得
-                    lambda_a = await self.bb.get_param("λ_a", 0.3)
-                    lambda_c = await self.bb.get_param("λ_c", 0.3)
+                    lambda_a = await self.bb.get_param("λ_a", 0.3) # λ params are obsolete for Boids
+                    lambda_c = await self.bb.get_param("λ_c", 0.3) # but UI still displays them.
                     lambda_s = await self.bb.get_param("λ_s", 0.1)
                     
-                    # エントロピー関連パラメータを取得
-                    entropy = await self.bb.get_param("entropy", 4.5)
-                    target_H = await self.bb.get_param("target_H", 5.0)
+                    entropy = await self.bb.get_param("entropy", 0.0) # Default to 0 if not set
+                    target_H = await self.bb.get_param("target_H", 5.0) # Example value
                     
-                    # メトリクスを辞書にまとめる
-                    metrics = {
+                    metrics_to_return = {
                         "entropy": float(entropy),
-                        "vdi": float(await self.bb.get_param("vdi", 0.7)),
-                        "fcr": float(await self.bb.get_param("fcr", 0.9)),
-                        "speed": float(await self.bb.get_param("speed", 15.0)),
-                        "lambda": {
-                            "a": float(lambda_a),
-                            "c": float(lambda_c),
-                            "s": float(lambda_s)
+                        "vdi": float(await self.bb.get_param("vdi", 0.0)),
+                        "fcr": float(await self.bb.get_param("fcr", 1.0)), # Default FCR is 1.0
+                        "speed": float(await self.bb.get_param("speed", 0.0)),
+                        "lambda": { # UI expects this structure for lambda
+                            "a": float(lambda_a), "c": float(lambda_c), "s": float(lambda_s)
                         },
-                        "target_H": float(target_H)
+                        "target_H": float(target_H) # Example, if used by controller
                     }
-                    return metrics
-                except:
-                    pass  # パラメータ取得に失敗した場合はメッセージから取得を試みる
+                    print(f"[METRICS_DEBUG] Dashboard._fetch_metrics returning from bb.get_param: {metrics_to_return}")
+                    return metrics_to_return
+                except Exception as e_get_param:
+                    print(f"[METRICS_DEBUG] Error fetching individual params from BlackBoard: {e_get_param}. Trying pull.")
+                    pass
                 
-                # 最新のメトリクスメッセージを取得
+                # Fallback: Try to get metrics from latest messages if direct get_param fails or is partial
+                # This part of logic might be redundant if metrics are consistently stored via set_param
+                # by the MetricsTracker via run_sim.py.
                 messages = await self.bb.pull(k=50)
                 latest_metrics = {
                     "entropy": 4.5,
@@ -620,33 +605,40 @@ class Dashboard:
                                 except (ValueError, TypeError):
                                     pass  # 数値に変換できない場合はスキップ
                 
-                # 現在時刻からランダム性を加えて値を微小変動させる（可視化のため）
-                import random
-                import time
-                  # BlackBoardから実際のメトリクスを取得
-                return latest_metrics
-            else:
-                # BlackBoardが利用できない場合のデフォルト値
-                print("BlackBoard not available for metrics")
-                return {
-                    "entropy": 0.0,
-                    "vdi": 0.0,
-                    "fcr": 0.0,
-                    "speed": 0.0,
-                    "lambda": {
-                        "a": 0.3,
-                        "c": 0.3,
-                        "s": 0.1
+                # This fallback logic might be simplified if metrics are reliably in bb.get_param
+                # For now, keeping a simplified version of it.
+                # If the above try block with get_param succeeded, this won't be reached.
+                print("[METRICS_DEBUG] Dashboard._fetch_metrics: bb.get_param path failed or was incomplete, trying pull for latest_metrics.")
+                messages = await self.bb.pull(k=1) # Check latest message for metrics update
+                latest_metrics_from_msg = {}
+                if messages and isinstance(messages[0], dict) and 'metrics' in messages[0]:
+                    latest_metrics_from_msg = messages[0]['metrics']
+
+                # Merge or select based on what was successfully fetched
+                # Prioritize values from get_param if they were fetched.
+                # This part is complex and depends on how metrics are stored.
+                # Assuming for now that if get_param path failed, we use a default or empty.
+                # The UI has its own defaults in Vue.
+
+                # If metrics_to_return is still empty, use a default structure.
+                if not metrics_to_return:
+                    metrics_to_return = {
+                        "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
+                        "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0
                     }
-                }
+                print(f"[METRICS_DEBUG] Dashboard._fetch_metrics (after potential fallback): {metrics_to_return}")
+                return metrics_to_return
+            else:
+                print("[METRICS_DEBUG] Dashboard._fetch_metrics: BlackBoard not available.")
+                # Return a default structure if BlackBoard is not available
+                return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
+                         "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0 }
         except Exception as e:
-            print(f"Error fetching metrics: {e}")
-            # エラー時のデフォルト値
-            return {
-                "entropy": 4.5,
-                "vdi": 0.7,
-                "fcr": 0.9,
-                "speed": 15.0,
+            print(f"[METRICS_DEBUG] Error in _fetch_metrics: {e}")
+            return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
+                     "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0 }
+
+    async def _fetch_blackboard(self) -> Dict[str, Any]:
                 "lambda": {
                     "a": 0.3,
                     "c": 0.3,
@@ -677,38 +669,24 @@ class Dashboard:
                         # トークン番号だけの場合は除外
                         if len(text.strip()) < 3:
                             continue
+
+                        # エージェント表示名のフォーマット
+                        display_name = role if role != f'Agent_{agent_id}' else f'Agent {agent_id}'
                         
-                        # New display_name logic:
-                        agent_id_num = msg.get('agent_id') # Original numeric ID
-                        agent_name_from_msg = msg.get('agent_name') # e.g., "Agent_1"
-
-                        # Prioritize agent_name if available, otherwise construct generic from agent_id
-                        if agent_name_from_msg:
-                            display_name = agent_name_from_msg
-                        elif agent_id_num is not None:
-                            display_name = f"Agent {agent_id_num}"
-                        else:
-                            display_name = f"Agent_{i}" # Fallback if no id or name in msg
-
                         formatted_messages.append({
-                            'agent_id': display_name, # This is what's shown in the UI's "Agent X:" prefix
-                            'text': text, # text variable already defined above
+                            'agent_id': display_name,
+                            'text': text,
                             'timestamp': msg.get('timestamp', '')
                         })
                     else:
-                        # メッセージが文字列の場合 (non-dict message)
+                        # メッセージが文字列の場合
                         if isinstance(msg, str) and len(msg.strip()) > 3:
                             # トークン番号だけの文字列は除外
                             if msg.startswith('token_') and len(msg) < 20:
                                 continue
                                 
-                            # For non-dict messages, use a generic identifier or index
-                            # The old version used `i % 5 + 1` which implies a fixed number of agents.
-                            # A simple index `i` might be better if the number of agents can vary.
-                            # Or, if non-dict messages are unexpected, log them or handle as 'Unknown'.
-                            display_name_for_non_dict = f"Entry {i}" # Or "Unknown Source"
                             formatted_messages.append({
-                                'agent_id': display_name_for_non_dict,
+                                'agent_id': f'Agent {i % 5 + 1}',  # 5つのエージェントIDを循環
                                 'text': str(msg),
                                 'timestamp': ''
                             })

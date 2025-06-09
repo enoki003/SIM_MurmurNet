@@ -1,8 +1,12 @@
 """
 SLMAgent - Small Language Model Agent Core Implementation
 
-Boids理論に基づく局所ルールで動作するSLMエージェントの実装。
-ダミーモード削除、echo-back問題修正済み。
+This module defines the core classes for language model interaction (LLM)
+and the agent behavior (SLMAgent).
+The LLM class acts as a wrapper for different model types (GGUF, Hugging Face),
+and integrates Boids-inspired logits processing.
+The SLMAgent class defines the agent's lifecycle, prompt construction,
+and interaction with the shared blackboard memory.
 """
 
 import asyncio
@@ -21,12 +25,18 @@ if TYPE_CHECKING:
 from transformers import LogitsProcessor # Actual import
 from ..llm_extensions.boids_logits_processor import BoidsLogitsProcessor
 
-# グローバルセマフォ - モデルへの同時アクセスを制御
-_model_semaphore = asyncio.Semaphore(1)  # 同時アクセス数を1に制限
+# Global semaphore to control simultaneous access to the model, preventing resource contention.
+_model_semaphore = asyncio.Semaphore(1)
 
 
 class LLM:
-    """言語モデルのラッパークラス（ダミーモード削除済み）"""
+    """
+    Language Model Wrapper (LLM).
+    Handles loading of different model types (GGUF via llama-cpp-python, or Hugging Face Transformers)
+    and provides a unified interface for text generation.
+    It also integrates BoidsLogitsProcessor for modifying token generation probabilities
+    based on Boids-inspired rules, if enabled and configured.
+    """
 
     def __init__(
         self,
@@ -34,7 +44,7 @@ class LLM:
         threads: int = 4,
         quantize: str = "q4",
         n_ctx: int = 512,
-        # BoidsLogitsProcessor related parameters for LLM class
+        # BoidsLogitsProcessor related parameters
         boids_enabled: bool = True,
         w_align: float = 0.1,
         w_sep: float = 0.1,
@@ -44,13 +54,29 @@ class LLM:
         theta_sep: float = 0.8,
         cohesion_prompt_text: Optional[str] = None
     ):
+        """
+        Initializes the LLM wrapper.
+
+        Args:
+            model_path (str): Path to the model file or Hugging Face model identifier.
+            threads (int): Number of threads for GGUF model processing.
+            quantize (str): Quantization level for the model (e.g., "q4").
+            n_ctx (int): Context length for the model.
+            boids_enabled (bool): Whether to enable BoidsLogitsProcessor.
+            w_align (float): Weight for the alignment rule in Boids.
+            w_sep (float): Weight for the separation rule in Boids.
+            w_cohesion (float): Weight for the cohesion rule in Boids.
+            n_align_tokens (int): Number of recent tokens to consider for alignment vector.
+            m_sep_tokens (int): Number of recent tokens to consider for separation check.
+            theta_sep (float): Similarity threshold for the separation rule.
+            cohesion_prompt_text (Optional[str]): Text used to generate the initial cohesion vector.
+        """
         self.model_path = model_path
         self.threads = threads
         self.quantize = quantize
         self.n_ctx = n_ctx
-        self.model: Optional[Any] = None # Can be HF PreTrainedModel or LlamaCpp model
-        self.tokenizer: Optional[Any] = None # Can be HF Tokenizer or None
-        self.use_dummy = False
+        self.model: Optional[Any] = None
+        self.tokenizer: Optional[Any] = None
 
         self.boids_enabled = boids_enabled
         self.w_align = w_align
@@ -65,6 +91,7 @@ class LLM:
         self._initialize()
 
     def _initialize(self):
+        """Initializes the model (GGUF or Hugging Face) and BoidsLogitsProcessor if enabled."""
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         try:
             if self.model_path.endswith(".gguf"):
@@ -77,29 +104,31 @@ class LLM:
                 "exception": str(e), "exception_type": type(e).__name__,
                 "message": f"Model initialization failed: {e}",
             }
-            raise RuntimeError(f"モデル読み込み失敗: {error_detail}")
+            raise RuntimeError(f"LLM Initialization Failed: {error_detail}")
 
     def _initialize_gguf(self):
+        """Initializes a GGUF model using llama-cpp-python."""
         try:
             from llama_cpp import Llama
             if not os.path.exists(self.model_path):
-                raise FileNotFoundError(f"Model file not found: {self.model_path}")
+                raise FileNotFoundError(f"GGUF model file not found: {self.model_path}")
             print(f"Loading GGUF model: {self.model_path}")
             self.model = Llama(
                 model_path=self.model_path, n_threads=self.threads,
                 n_ctx=self.n_ctx, verbose=False,
             )
             self.tokenizer = None
-            print(f"GGUF model loaded successfully with {self.threads} threads, context length: {self.n_ctx}")
+            print(f"GGUF model loaded successfully (threads: {self.threads}, context: {self.n_ctx})")
             if self.boids_enabled:
                 self.boids_processor = None
                 print("[WARNING] BoidsLogitsProcessor is currently not supported for GGUF models. Boids processing will be skipped.")
         except ImportError:
-            raise ImportError("llama-cpp-python is required for GGUF models. Install it with: pip install llama-cpp-python")
+            raise ImportError("llama-cpp-python is required for GGUF models. Install with: pip install llama-cpp-python")
         except Exception as e:
-            raise RuntimeError(f"Failed to load GGUF model: {e}")
+            raise RuntimeError(f"Failed to load GGUF model '{self.model_path}': {e}")
 
     def _initialize_hf(self):
+        """Initializes a Hugging Face Transformers model."""
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             print(f"Loading HF model: {self.model_path}")
@@ -107,32 +136,34 @@ class LLM:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_path, low_cpu_mem_usage=True, device_map="auto"
             )
-            model_device = self.model.device if hasattr(self.model, 'device') else 'cpu'
+            model_device = str(self.model.device if hasattr(self.model, 'device') else 'cpu')
             print(f"HF model loaded successfully on device: {model_device}")
 
             if self.boids_enabled:
-                if self.model and self.tokenizer and not isinstance(self.model, str):
+                if self.model and self.tokenizer and hasattr(self.model, 'get_input_embeddings'): # Check for get_input_embeddings
                     self.boids_processor = BoidsLogitsProcessor(
                         model=self.model,
                         tokenizer=self.tokenizer,
                         w_align=self.w_align, w_sep=self.w_sep, w_cohesion=self.w_cohesion,
                         n_align_tokens=self.n_align_tokens, m_sep_tokens=self.m_sep_tokens,
                         theta_sep=self.theta_sep, cohesion_prompt_text=self.cohesion_prompt_text,
-                        device=str(model_device)
+                        device=model_device
                     )
                     print(f"[INFO] BoidsLogitsProcessor initialized for HF model on device {model_device}.")
                 else:
-                    print("[WARNING] HF Model (actual instance) or Tokenizer not available, BoidsLogitsProcessor cannot be initialized.")
+                    print("[WARNING] HF Model (actual instance), Tokenizer, or get_input_embeddings method not available. BoidsLogitsProcessor cannot be initialized.")
                     self.boids_processor = None
         except ImportError:
-            raise ImportError("transformers is required for Hugging Face models. Install it with: pip install transformers torch")
+            raise ImportError("transformers is required for Hugging Face models. Install with: pip install transformers torch")
         except Exception as e:
-            raise RuntimeError(f"Failed to load HF model: {e}")
+            raise RuntimeError(f"Failed to load HF model '{self.model_path}': {e}")
 
     def _format_gemma_prompt(self, prompt: str) -> str:
+        """Formats a prompt for Gemma models according to its specific chat template."""
         return f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
 
     def _is_gemma_model(self) -> bool:
+        """Checks if the model path indicates a Gemma model."""
         return "gemma" in self.model_path.lower()
 
     def generate(
@@ -144,12 +175,29 @@ class LLM:
         repeat_penalty: float = 1.0,
         stop: Optional[List[str]] = None,
     ) -> str:
+        """
+        Generates text using the loaded language model.
+
+        Args:
+            prompt (str): The input prompt for text generation.
+            max_tokens (int): Maximum number of new tokens to generate.
+            temperature (float): Sampling temperature.
+            top_p (float): Nucleus sampling probability.
+            repeat_penalty (float): Penalty for repeating tokens.
+            stop (Optional[List[str]]): List of stop sequences.
+
+        Returns:
+            str: The generated text.
+
+        Raises:
+            RuntimeError: If generation fails for any model type.
+        """
         internal_logits_processors = []
         if self.boids_enabled and self.boids_processor:
             internal_logits_processors.append(self.boids_processor)
 
         if self.model is None:
-            return f"[ERROR] ModelNotInitialized: Model is not initialized."
+            return "[ERROR] ModelNotInitialized: Model is not initialized."
 
         formatted_prompt = self._format_gemma_prompt(prompt) if self._is_gemma_model() else prompt
 
@@ -187,18 +235,35 @@ class LLM:
             except Exception as e:
                 raise RuntimeError(f"HF text generation failed: {e}")
         else:
-            return "[ERROR] Model type not recognized for generation or tokenizer missing for HF."
+            return "[ERROR] Model type not recognized for generation or tokenizer missing for HF model."
 
 
 class SLMAgent:
+    """
+    Small Language Model Agent (SLMAgent).
+    Represents an individual agent in the simulation. It has a role (now generic),
+    uses an LLM instance for text generation (which handles Boids logic internally),
+    and interacts with other agents via a shared Blackboard.
+    Its behavior during conversation is guided by a generic instruction and conversation history.
+    """
     def __init__(
         self,
         id: int,
         role: str,
         model: LLM,
-        tokenizer: Any,
+        tokenizer: Any, # Tokenizer from the LLM wrapper, used by SLMAgent for prompt construction.
         name: Optional[str] = None,
     ):
+        """
+        Initializes an SLMAgent.
+
+        Args:
+            id (int): Unique identifier for the agent.
+            role (str): The role of the agent (typically "Agent").
+            model (LLM): The LLM instance (which includes Boids config) used for text generation.
+            tokenizer (Any): The tokenizer associated with the LLM (can be None for GGUF).
+            name (Optional[str]): Optional name for the agent. Defaults to "Agent_{id}".
+        """
         self.id = id
         self.role = role
         self.name = name if name else f"Agent_{id}"
@@ -207,31 +272,54 @@ class SLMAgent:
         self.cache: Dict[str, Any] = {}
         print(f"[DEBUG] Agent {id} ({self.name}/{self.role}) initialized.")
 
-    def _build_role_specific_prompt(self, base_prompt: str, conversation_history: List[Dict[str, Any]]) -> str:
+    def _build_role_specific_prompt(self, base_task_prompt: str, conversation_history: List[Dict[str, Any]]) -> str:
+        """
+        Constructs a prompt for the LLM based on a generic agent instruction,
+        conversation history, and current task.
+
+        Args:
+            base_task_prompt (str): The fundamental task or question for the current turn.
+            conversation_history (List[Dict[str, Any]]): Recent messages from the blackboard.
+
+        Returns:
+            str: The fully constructed prompt for the LLM.
+        """
         instruction = "You are a helpful AI agent participating in a discussion. Please provide a thoughtful and constructive response based on the current task and conversation history."
+
         prompt_parts = [instruction]
+
         if conversation_history:
             formatted_history = []
             for msg in conversation_history[-5:]:
                 if isinstance(msg, dict):
-                    name_hist = msg.get("agent_name", msg.get("name", "Unknown"))
-                    role_hist = msg.get("role", "")
-                    text_hist = msg.get("text", str(msg))
-                    formatted_history.append(f"{name_hist}({role_hist}): {text_hist}")
+                    sender_name = msg.get("agent_name", msg.get("name", "Unknown"))
+                    sender_role = msg.get("role", "")
+                    text_content = msg.get("text", str(msg))
+                    formatted_history.append(f"{sender_name}({sender_role}): {text_content}")
                 else:
                     formatted_history.append(str(msg))
             if formatted_history:
                 prompt_parts.append("これまでの会話 (Recent Conversation):\n" + "\n".join(formatted_history))
-        
-        prompt_parts.append(f"現在のタスク (Current Task): {base_prompt}")
+
+        prompt_parts.append(f"現在のタスク (Current Task): {base_task_prompt}")
         prompt_parts.append(f"あなた ({self.role}) としての応答 (Your response as {self.role}):")
-        
+
         final_prompt = "\n\n".join(prompt_parts)
         return final_prompt
 
-    async def run_conversation(self, initial_prompt: str, bb: "BlackBoard", max_turns: int = 10) -> None:
-        current_task_prompt = initial_prompt
-        print(f"[DEBUG] Agent {self.id} ({self.name}/{self.role}) starting conversation with max_turns: {max_turns}, initial task: '{current_task_prompt}'")
+    async def run_conversation(self, initial_task_prompt: str, bb: "BlackBoard", max_turns: int = 10) -> None:
+        """
+        Runs the agent's conversation loop for a specified number of turns.
+        The agent constructs a prompt using its generic role instruction and history,
+        then calls the LLM (which has Boids logic) to generate a response.
+
+        Args:
+            initial_task_prompt (str): The initial prompt or task for the agent.
+            bb (BlackBoard): The shared blackboard instance for message passing.
+            max_turns (int): Maximum number of turns the agent will participate in.
+        """
+        current_task_prompt = initial_task_prompt
+        print(f"[DEBUG] Agent {self.id} ({self.name}/{self.role}) starting conversation (max_turns: {max_turns}, initial_task: '{current_task_prompt:.50}...')")
         try:
             for turn in range(max_turns):
                 conversation_history = await bb.pull_messages_raw(k=10)
@@ -239,19 +327,21 @@ class SLMAgent:
                 response = await self._generate_response(prompt_for_llm)
                 
                 if response and response.strip():
-                    message = {
+                    message_to_post = {
                         "agent_id": self.id, "agent_name": self.name, "role": self.role,
                         "text": response.strip(), "turn": turn, "timestamp": time.time()
                     }
-                    await bb.push(message)
+                    await bb.push(message_to_post)
                     print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) turn {turn}: {response.strip()[:100]}...")
                 else:
                     print(f"[WARNING] Agent {self.id} ({self.name}/{self.role}) generated empty response at turn {turn}")
+
                 await asyncio.sleep(random.uniform(2.0, 5.0))
         except Exception as e:
             print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) conversation failed: {e}")
 
     async def _generate_response(self, prompt: str) -> str:
+        """Generates a response from the LLM, using a global semaphore for model access."""
         global _model_semaphore
         async with _model_semaphore:
             try:
@@ -266,7 +356,8 @@ class SLMAgent:
                 print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) generation failed: {e}")
                 return f"[ERROR] Agent response generation error: {e}"
 
-    def generate(self, prompt: str, **kwargs) -> str: # Sync version for compatibility
+    def generate(self, prompt: str, **kwargs) -> str: # Sync version for compatibility or testing
+        """Synchronous version of text generation for compatibility or testing."""
         try:
             return self.model_wrapper.generate(prompt, **kwargs)
         except Exception as e:
@@ -274,6 +365,16 @@ class SLMAgent:
             return f"[ERROR] Agent sync response generation error: {e}"
 
 def sample_top_p(logits: np.ndarray, p: float = 0.9) -> int:
+    """
+    Top-p (nucleus) sampling.
+
+    Args:
+        logits (np.ndarray): Raw logits from the model.
+        p (float): Cumulative probability threshold for nucleus sampling.
+
+    Returns:
+        int: Index of the selected token.
+    """
     try:
         probs = torch.softmax(torch.from_numpy(logits), dim=-1).numpy()
         sorted_indices = np.argsort(probs)[::-1]
@@ -287,7 +388,7 @@ def sample_top_p(logits: np.ndarray, p: float = 0.9) -> int:
         selected_idx = np.random.choice(valid_indices, p=valid_probs)
         return selected_idx
     except Exception as e:
-        print(f"[WARNING] Top-p sampling failed: {e}, using greedy selection")
+        print(f"[WARNING] Top-p sampling failed: {e}, using greedy selection (argmax).")
         return np.argmax(logits)
 
 ```

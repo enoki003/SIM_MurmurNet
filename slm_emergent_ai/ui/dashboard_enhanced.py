@@ -589,33 +589,22 @@ class EnhancedDashboard:
                         if len(text.strip()) < 3:
                             continue
 
-                        # New display_name logic:
-                        agent_id_num = msg.get('agent_id') # Original numeric ID
-                        agent_name_from_msg = msg.get('agent_name') # e.g., "Agent_1"
-
-                        # Prioritize agent_name if available, otherwise construct generic from agent_id
-                        if agent_name_from_msg:
-                            display_name = agent_name_from_msg
-                        elif agent_id_num is not None:
-                            display_name = f"Agent {agent_id_num}"
-                        else:
-                            display_name = f"Agent_{i}" # Fallback if no id or name in msg
+                        # エージェント表示名のフォーマット
+                        display_name = role if role != f'Agent_{agent_id}' else f'Agent {agent_id}'
                         
                         formatted_messages.append({
-                            'agent_id': display_name, # This is what's shown in the UI
-                            'text': text, # text variable already defined above
+                            'agent_id': display_name,
+                            'text': text,
                             'timestamp': msg.get('timestamp', '')
                         })
                     elif isinstance(msg, str) and len(msg.strip()) > 3:
-                        # メッセージが文字列の場合 (non-dict message)
+                        # メッセージが文字列の場合
                         # トークン番号だけの文字列は除外
                         if msg.startswith('token_') and len(msg) < 20:
                             continue
 
-                        # For non-dict messages, use a generic identifier or index
-                        display_name_for_non_dict = f"Entry {i}" # Or "Unknown Source"
                         formatted_messages.append({
-                            'agent_id': display_name_for_non_dict,
+                            'agent_id': f'Agent {i % 5 + 1}',  # 5つのエージェントIDを循環
                             'text': str(msg),
                             'timestamp': ''
                         })
