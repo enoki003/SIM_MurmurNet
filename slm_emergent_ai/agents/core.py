@@ -129,6 +129,18 @@ class LLM:
             if self.boids_enabled:
                 try:
                     print("[INFO] Attempting to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model...")
+                    
+                    # GGUF時はcohesion_prompt_textを強制的にオフにする
+                    cohesion_text_for_gguf = None
+                    if self.cohesion_prompt_text is not None:
+                        print("[WARNING] GGUF mode detected: cohesion_prompt_text is not supported and will be disabled.")
+                        print(f"[WARNING] Original cohesion_prompt_text was: '{self.cohesion_prompt_text[:100]}...'")
+                    
+                    # w_cohesionが0より大きい場合も警告
+                    if self.w_cohesion > 0:
+                        print(f"[WARNING] GGUF mode: w_cohesion ({self.w_cohesion}) > 0 may not work properly without embedding matrix access.")
+                        print("[WARNING] Consider setting w_cohesion to 0 in config for GGUF models.")
+                    
                     self.boids_processor = GGUFBoidsLogitsProcessorWrapper(
                         gguf_model=self.model,
                         hf_tokenizer_for_cohesion=None, # Passing None for now, self.tokenizer is None for GGUF
@@ -138,7 +150,7 @@ class LLM:
                         n_align_tokens=self.n_align_tokens,
                         m_sep_tokens=self.m_sep_tokens,
                         theta_sep=self.theta_sep,
-                        cohesion_prompt_text=self.cohesion_prompt_text,
+                        cohesion_prompt_text=cohesion_text_for_gguf,  # Always None for GGUF
                         device='cpu'
                     )
                     if self.boids_processor and hasattr(self.boids_processor, 'boids_processor_internal') and self.boids_processor.boids_processor_internal is not None:

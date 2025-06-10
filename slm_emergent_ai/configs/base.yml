@@ -3,20 +3,20 @@
 
 # SLM Emergent AI 基本設定
 model:
-  path: "C:\\Users\\admin\\Desktop\\slm\\SIM_MurmurNet\\scripts\\models\\gemma-3-1b-it-q4_0.gguf"  # ローカルGGUFモデルパス
+  path: "google/gemma-3-1b-it"  # HuggingFace model for full Boids functionality
   quantize: "q4"     # 量子化レベル (Note: may not apply directly to HF transformers loading)
   n_ctx: 2048        # コンテキスト長を2048に増加（元: 512）
   boids_logits_params: # BoidsLogitsProcessor parameters moved under model
-    enabled: true    # Enable Boids for GGUF (experimental)
-    w_align: 0.05                # Alignment weight (reduced from 0.1)
-    w_sep: 0.3                   # Separation weight (increased from 0.2)
-    w_cohesion: 0.1              # Cohesion weight (reduced from 0.15)
-    n_align_tokens: 15           # Number of recent tokens for alignment vector
-    m_sep_tokens: 15           # Number of recent tokens for separation check
-    theta_sep: 0.80              # Separation similarity threshold (reduced from 0.85)
-    # Example of a general cohesion prompt text.
-    # If not provided or empty, run_sim.py will use the first initial_prompt.
-    cohesion_prompt_text: "Focus on collaborative problem solving, shared understanding, and innovative ideas."
+    enabled: true    # Enable Boids with full functionality
+    w_align: 0.1                 # Alignment weight (full semantic alignment)
+    w_sep: 0.2                   # Separation weight (semantic diversity)
+    w_cohesion: 0.15             # Cohesion weight (semantic cohesion)
+    n_align_tokens: 10           # Number of recent tokens for alignment vector
+    m_sep_tokens: 10             # Number of recent tokens for separation check
+    theta_sep: 0.85              # Separation similarity threshold
+    cohesion_prompt_text: "Focus on collaborative problem solving, shared understanding, and innovative ideas."   # Cohesion guidance text
+    
+    # Note: Full Boids functionality with semantic embeddings available for HuggingFace models
 
 agent:
   n: 3               # エージェント数

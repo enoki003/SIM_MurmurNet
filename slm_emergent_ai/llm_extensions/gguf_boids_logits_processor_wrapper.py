@@ -19,27 +19,49 @@ class GGUFBoidsLogitsProcessorWrapper:
         cohesion_prompt_text: Optional[str] = None,
         device: str = 'cpu' # GGUF is primarily CPU
     ):
+        print("[GGUF WRAPPER] WARNING: You are using GGUF mode with limited Boids functionality.")
+        print("[GGUF WRAPPER] WARNING: For full Boids features, consider using HuggingFace models instead.")
+        
         self.gguf_model = gguf_model # Keep for potential future use (e.g., direct embedding calls)
         self.device = device
         self.input_ids_dtype = np.intc
         self.scores_dtype = np.single
 
+        # GGUF時はcohesion_prompt_textを強制的にオフにする
+        if cohesion_prompt_text is not None:
+            print("[GGUF WRAPPER] WARNING: cohesion_prompt_text is not supported in GGUF mode. Forcing to None.")
+            cohesion_prompt_text = None
+        
+        # GGUF時はw_cohesionを強制的に0に設定（embedding matrixがないため）
+        original_w_cohesion = w_cohesion
+        if w_cohesion > 0:
+            print(f"[GGUF WRAPPER] WARNING: w_cohesion ({w_cohesion}) requires embedding matrix, forcing to 0 for GGUF mode.")
+            w_cohesion = 0.0
+        
+        # alignment と separation は簡易版で実装可能なので維持
+        print(f"[GGUF WRAPPER] INFO: Using simplified Boids rules for GGUF mode:")
+        print(f"[GGUF WRAPPER] INFO: w_align={w_align} (token-level alignment)")
+        print(f"[GGUF WRAPPER] INFO: w_sep={w_sep} (token repetition penalty)")
+        print(f"[GGUF WRAPPER] INFO: w_cohesion={w_cohesion} (disabled, was {original_w_cohesion})")
+
         try:
-            print(f"[GGUF WRAPPER] Initializing BoidsLogitsProcessor for GGUF mode.")
+            print(f"[GGUF WRAPPER] Initializing BoidsLogitsProcessor for GGUF mode with simplified rules.")
+            
             self.boids_processor_internal = BoidsLogitsProcessor(
                 model=None,  # Pass None, as gguf_model is not a PreTrainedModel
                 tokenizer=None, # Pass original tokenizer as None
                 external_tokenizer=hf_tokenizer_for_cohesion, # Pass this to the new param
                 external_embedding_matrix=None, # Explicitly None for now for GGUF
                 is_gguf_mode=True, # Indicate GGUF context
-                w_align=w_align,
-                w_sep=w_sep,
-                w_cohesion=w_cohesion,
+                w_align=w_align,  # Keep original alignment weight for simplified implementation
+                w_sep=w_sep,      # Keep original separation weight for repetition penalty
+                w_cohesion=w_cohesion,  # This will be 0 due to the check above
                 n_align_tokens=n_align_tokens,
                 m_sep_tokens=m_sep_tokens,
                 theta_sep=theta_sep,
-                cohesion_prompt_text=cohesion_prompt_text,
-                device=device
+                cohesion_prompt_text=cohesion_prompt_text,  # This will be None due to the check above
+                device=device,
+                debug_mode=False  # Disable debug mode to reduce log spam
             )
             if self.boids_processor_internal:
                  print("[GGUF WRAPPER] BoidsLogitsProcessor initialized within wrapper for GGUF mode.")

@@ -1,8 +1,8 @@
 import torch
-from transformers import LogitsProcessor, PreTrainedModel, PreTrainedTokenizerBase
-from typing import Optional, List
-import torch.nn.functional as F
 import numpy as np
+from typing import Optional, Any
+from transformers import LogitsProcessor, PreTrainedModel, PreTrainedTokenizerBase
+import torch.nn.functional as F
 
 class BoidsLogitsProcessor(LogitsProcessor):
     """

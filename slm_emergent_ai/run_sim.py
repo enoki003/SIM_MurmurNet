@@ -56,17 +56,28 @@ except ImportError:
 # グローバル変数でシャットダウン状態を管理
 shutdown_requested = False
 current_agents = []
+shutdown_in_progress = False  # 重複シャットダウンを防ぐフラグを追加
 
 def signal_handler(signum, frame):
     """シグナルハンドラー（Ctrl+C対応）"""
-    global shutdown_requested, current_agents
+    global shutdown_requested, current_agents, shutdown_in_progress
+    
+    # 既にシャットダウン処理中の場合は無視
+    if shutdown_in_progress:
+        print(f"\n[INFO] Shutdown already in progress, ignoring signal {signum}")
+        return
+    
+    shutdown_in_progress = True
     print(f"\n[INFO] Shutdown signal received (signal: {signum}). Initiating graceful shutdown...")
     shutdown_requested = True
     
     # エージェントにシャットダウンを通知
     for agent in current_agents:
         if hasattr(agent, 'shutdown'):
-            agent.shutdown()
+            try:
+                agent.shutdown()
+            except Exception as e:
+                print(f"[WARNING] Error shutting down agent {getattr(agent, 'id', 'unknown')}: {e}")
 
 # -----------------------------------------------------------------------------
 # Simulation Core
@@ -388,10 +399,17 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
     finally:
         print("\n[INFO] Shutting down simulation...")
         
-        # エージェントにシャットダウンを通知
-        for agent in agents:
-            if hasattr(agent, 'shutdown'):
-                agent.shutdown()
+        # 重複シャットダウンを防ぐ
+        if not shutdown_in_progress:
+            shutdown_in_progress = True
+            
+            # エージェントにシャットダウンを通知
+            for agent in agents:
+                if hasattr(agent, 'shutdown'):
+                    try:
+                        agent.shutdown()
+                    except Exception as e:
+                        print(f"[WARNING] Error shutting down agent {getattr(agent, 'id', 'unknown')}: {e}")
         
         print("Cancelling outstanding tasks...")
         tasks_to_cancel = [controller_task, metrics_task, *agent_tasks]
