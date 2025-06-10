@@ -177,10 +177,19 @@ class LLM:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             print(f"Loading HF model: {self.model_path}")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            
+            # Remove device_map="auto" to avoid accelerate dependency
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path, low_cpu_mem_usage=True, device_map="auto"
+                self.model_path, 
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
             )
-            model_device = str(self.model.device if hasattr(self.model, 'device') else 'cpu')
+            
+            # Move model to appropriate device
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.model = self.model.to(device)
+            
+            model_device = str(self.model.device if hasattr(self.model, 'device') else device)
             print(f"HF model loaded successfully on device: {model_device}")
 
             if self.boids_enabled:
