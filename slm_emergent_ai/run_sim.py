@@ -18,6 +18,7 @@ import asyncio
 import os
 import sys
 import time
+import signal
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -26,13 +27,46 @@ import yaml
 import numpy as np
 import torch
 
-from .agents.core import SLMAgent, LLM
-from .memory.blackboard import BlackBoard
-from .controller.meta import MetaController
-from .eval.metrics import MetricsTracker, calculate_vdi, calculate_fcr
-from .ui.dashboard import init_app
-from .agents.rag import RAGAgent
+# Add current directory to Python path for module discovery
+if __name__ == "__main__":
+    # Add the parent directory to sys.path to enable imports
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
 
+# Try absolute import first, fall back to relative import
+try:
+    from slm_emergent_ai.agents.core import SLMAgent, LLM
+    from slm_emergent_ai.memory.blackboard import BlackBoard
+    from slm_emergent_ai.controller.meta import MetaController
+    from slm_emergent_ai.eval.metrics import MetricsTracker, calculate_vdi, calculate_fcr
+    from slm_emergent_ai.ui.dashboard import init_app
+    from slm_emergent_ai.agents.rag import RAGAgent
+except ImportError:
+    # Fallback to relative imports
+    from .agents.core import SLMAgent, LLM
+    from .memory.blackboard import BlackBoard
+    from .controller.meta import MetaController
+    from .eval.metrics import MetricsTracker, calculate_vdi, calculate_fcr
+    from .ui.dashboard import init_app
+    from .agents.rag import RAGAgent
+
+
+# グローバル変数でシャットダウン状態を管理
+shutdown_requested = False
+current_agents = []
+
+def signal_handler(signum, frame):
+    """シグナルハンドラー（Ctrl+C対応）"""
+    global shutdown_requested, current_agents
+    print(f"\n[INFO] Shutdown signal received (signal: {signum}). Initiating graceful shutdown...")
+    shutdown_requested = True
+    
+    # エージェントにシャットダウンを通知
+    for agent in current_agents:
+        if hasattr(agent, 'shutdown'):
+            agent.shutdown()
 
 # -----------------------------------------------------------------------------
 # Simulation Core
@@ -46,8 +80,14 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
         config (Dict[str, Any]): A dictionary containing the simulation configuration,
                                  typically loaded from a YAML file.
     """
+    global shutdown_requested, current_agents
 
     print("Initializing SLM Emergent AI...")
+
+    # シグナルハンドラーを設定
+    signal.signal(signal.SIGINT, signal_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, signal_handler)
 
     # --- Blackboard Initialization ---
     bb_mode: str = config.get("memory", {}).get("mode", "local")
@@ -120,6 +160,7 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
     # --- Agent Initialization ---
     agent_count: int = config.get("agent", {}).get("n", 3)
     agents: List[SLMAgent] = []
+    current_agents = agents  # グローバル変数に設定
 
     print(f"Initializing {agent_count} agents...")
 
@@ -197,76 +238,123 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
     async def metrics_update_loop() -> None:
         nonlocal step_counter, simulation_logs, model, metrics_tracker, bb
 
-        while True:
-            await asyncio.sleep(2)
-            step_counter += 1
+        while not shutdown_requested:
+            try:
+                await asyncio.sleep(2)
+                step_counter += 1
 
-            all_messages_raw = await bb.pull_messages_raw(k=-1)
+                all_messages_raw = await bb.pull_messages_raw(k=-1)
 
-            current_total_tokens = 0
-            vdi_tokens_list = []
+                current_total_tokens = 0
+                vdi_tokens_list = []
 
-            active_tokenizer = model.tokenizer
+                active_tokenizer = model.tokenizer
 
-            for msg_item in all_messages_raw:
-                if isinstance(msg_item, dict) and "text" in msg_item:
-                    text_content = msg_item.get("text", "")
+                for msg_item in all_messages_raw:
+                    if isinstance(msg_item, dict) and "text" in msg_item:
+                        text_content = msg_item.get("text", "")
+                        if active_tokenizer:
+                            current_total_tokens += len(active_tokenizer.encode(text_content))
+                        else:
+                            current_total_tokens += len(text_content.split())
+
+                recent_messages_for_vdi_calc = all_messages_raw[-20:]
+                vdi_texts = [msg_item.get("text", "") for msg_item in recent_messages_for_vdi_calc if isinstance(msg_item, dict)]
+                for text_item in vdi_texts:
                     if active_tokenizer:
-                        current_total_tokens += len(active_tokenizer.encode(text_content))
+                        vdi_tokens_list.extend(active_tokenizer.encode(text_item))
                     else:
-                        current_total_tokens += len(text_content.split())
+                        vdi_tokens_list.extend(text_item.split())
 
-            recent_messages_for_vdi_calc = all_messages_raw[-20:]
-            vdi_texts = [msg_item.get("text", "") for msg_item in recent_messages_for_vdi_calc if isinstance(msg_item, dict)]
-            for text_item in vdi_texts:
-                if active_tokenizer:
-                    vdi_tokens_list.extend(active_tokenizer.encode(text_item))
+                # Updated placeholder comment
+                fact_check_results = [] # Placeholder for FCR data; FCR will be 1.0 as no fact-checking mechanism is currently implemented.
+
+                # Metric Calculation (calculate_vdi, calculate_fcr are imported from top)
+                print(f"[METRICS_DEBUG] VDI Tokens (len): {len(vdi_tokens_list)}, Sample: {vdi_tokens_list[:10] if vdi_tokens_list else '[]'}...")
+                vdi_value = calculate_vdi(vdi_tokens_list)
+                
+                # Calculate FCR based on message content diversity (simple heuristic)
+                if len(all_messages_raw) > 1:
+                    unique_agent_responses = set()
+                    total_agent_responses = 0
+                    for msg in all_messages_raw[-10:]:  # Check last 10 messages
+                        if isinstance(msg, dict) and msg.get("text"):
+                            text = msg.get("text", "").strip()
+                            if len(text) > 10:  # Filter out very short responses
+                                unique_agent_responses.add(text[:50])  # Use first 50 chars for uniqueness
+                                total_agent_responses += 1
+                    fcr_value = len(unique_agent_responses) / max(total_agent_responses, 1) if total_agent_responses > 0 else 1.0
                 else:
-                    vdi_tokens_list.extend(text_item.split())
+                    fcr_value = 1.0
+                
+                # Calculate entropy based on agent response patterns
+                if len(all_messages_raw) > 0:
+                    agent_message_counts = {}
+                    for msg in all_messages_raw[-20:]:  # Last 20 messages
+                        if isinstance(msg, dict):
+                            agent_id = msg.get("agent_id", 0)
+                            agent_message_counts[agent_id] = agent_message_counts.get(agent_id, 0) + 1
+                    
+                    if agent_message_counts:
+                        total_messages = sum(agent_message_counts.values())
+                        probs = [count / total_messages for count in agent_message_counts.values()]
+                        entropy_value = -sum(p * np.log2(p) for p in probs if p > 0)
+                    else:
+                        entropy_value = 0.0
+                else:
+                    entropy_value = 0.0
+                
+                print(f"[METRICS_DEBUG] Calculated VDI: {vdi_value:.4f}, Calculated FCR: {fcr_value:.4f}, Calculated Entropy: {entropy_value:.4f}")
 
-            # Updated placeholder comment
-            fact_check_results = [] # Placeholder for FCR data; FCR will be 1.0 as no fact-checking mechanism is currently implemented.
+                # Tracker Updates
+                metrics_tracker.update_vdi(vdi_value)
+                metrics_tracker.update_fcr(fcr_value)
+                metrics_tracker.update_entropy(entropy_value)  # Now using calculated entropy
+                print(f"[METRICS_DEBUG] Total tokens for speed calc (current_total_tokens): {current_total_tokens}")
+                metrics_tracker.update_token_count(current_total_tokens)
 
-            # Metric Calculation (calculate_vdi, calculate_fcr are imported from top)
-            print(f"[METRICS_DEBUG] VDI Tokens (len): {len(vdi_tokens_list)}, Sample: {vdi_tokens_list[:10] if vdi_tokens_list else '[]'}...")
-            vdi_value = calculate_vdi(vdi_tokens_list)
-            fcr_value = calculate_fcr(fact_check_results)
-            print(f"[METRICS_DEBUG] Calculated VDI: {vdi_value:.4f}, Calculated FCR: {fcr_value:.4f}")
+                # Save calculated metrics to BlackBoard for UI access
+                current_metrics = metrics_tracker.get_current_metrics()
+                await bb.set_param("vdi", current_metrics['vdi'])
+                await bb.set_param("fcr", current_metrics['fcr'])
+                await bb.set_param("entropy", current_metrics['entropy'])
+                await bb.set_param("speed", current_metrics['speed'])
+                
+                print(f"[METRICS_DEBUG] Saved metrics to BlackBoard: VDI={current_metrics['vdi']:.4f}, FCR={current_metrics['fcr']:.4f}, Speed={current_metrics['speed']:.4f}")
 
-            # Tracker Updates
-            metrics_tracker.update_vdi(vdi_value)
-            metrics_tracker.update_fcr(fcr_value)
-            # Updated placeholder comment
-            metrics_tracker.update_entropy(0.0) # Placeholder for entropy; actual entropy from model probabilities is not currently implemented.
-            print(f"[METRICS_DEBUG] Total tokens for speed calc (current_total_tokens): {current_total_tokens}")
-            metrics_tracker.update_token_count(current_total_tokens)
+                # Logging step_log
+                agent_responses_for_log = {
+                    msg_item.get("agent_id", 0): msg_item.get("text", "")
+                    for msg_item in all_messages_raw[-3:]
+                    if isinstance(msg_item, dict)
+                }
+                # This is the dictionary that gets logged to console if eval_enabled
+                current_metrics_to_log = metrics_tracker.get_current_metrics()
+                # Augment with step and other info for simulation_logs list
+                step_log_entry = {
+                    "step": step_counter, "timestamp": time.strftime("%H:%M:%S"),
+                    "agent_responses": agent_responses_for_log, "total_messages": len(all_messages_raw),
+                    "vdi": current_metrics_to_log.get('vdi', 0.0), # Get from tracker
+                    "fcr": current_metrics_to_log.get('fcr', 0.0), # Get from tracker
+                    "entropy": current_metrics_to_log.get('entropy', 0.0), # Get from tracker
+                    "speed": current_metrics_to_log.get('speed', 0.0), # Get from tracker
+                    "total_tokens_for_speed_calc": current_total_tokens,
+                }
+                simulation_logs.append(step_log_entry)
 
-            # Logging step_log
-            agent_responses_for_log = {
-                msg_item.get("agent_id", 0): msg_item.get("text", "")
-                for msg_item in all_messages_raw[-3:]
-                if isinstance(msg_item, dict)
-            }
-            # This is the dictionary that gets logged to console if eval_enabled
-            current_metrics_to_log = metrics_tracker.get_current_metrics()
-            # Augment with step and other info for simulation_logs list
-            step_log_entry = {
-                "step": step_counter, "timestamp": time.strftime("%H:%M:%S"),
-                "agent_responses": agent_responses_for_log, "total_messages": len(all_messages_raw),
-                "vdi": current_metrics_to_log.get('vdi', 0.0), # Get from tracker
-                "fcr": current_metrics_to_log.get('fcr', 0.0), # Get from tracker
-                "entropy": current_metrics_to_log.get('entropy', 0.0), # Get from tracker
-                "speed": current_metrics_to_log.get('speed', 0.0), # Get from tracker
-                "total_tokens_for_speed_calc": current_total_tokens,
-            }
-            simulation_logs.append(step_log_entry)
-
-            if eval_enabled and step_counter % eval_freq == 0:
-                # Log the dictionary that is being constructed for simulation_logs for console output
-                # but ensure it includes all relevant current metrics from the tracker.
-                # The `current_metrics_to_log` now directly comes from tracker.
-                print(f"[METRICS_DEBUG] Logged current_metrics_to_log for console: {current_metrics_to_log}")
-                print(f"[METRICS] Step {step_counter}: {current_metrics_to_log}") # Original log line
+                if eval_enabled and step_counter % eval_freq == 0:
+                    # Log the dictionary that is being constructed for simulation_logs for console output
+                    # but ensure it includes all relevant current metrics from the tracker.
+                    # The `current_metrics_to_log` now directly comes from tracker.
+                    print(f"[METRICS_DEBUG] Logged current_metrics_to_log for console: {current_metrics_to_log}")
+                    print(f"[METRICS] Step {step_counter}: {current_metrics_to_log}") # Original log line
+            except asyncio.CancelledError:
+                print("[INFO] Metrics update loop cancelled.")
+                break
+            except Exception as e:
+                print(f"[ERROR] Error in metrics update loop: {e}")
+                if shutdown_requested:
+                    break
 
     metrics_task = asyncio.create_task(metrics_update_loop())
 
@@ -280,31 +368,46 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
 
         async def delayed_start(agent_to_run: SLMAgent, p_task: str, d_delay: float) -> None:
             await asyncio.sleep(d_delay)
-            print(f"[DEBUG] Starting agent {agent_to_run.id} ({agent_to_run.name}/{agent_to_run.role}) after {d_delay}s delay")
-            await agent_to_run.run_conversation(p_task, bb, max_turns=sys.maxsize)
+            if not shutdown_requested:
+                print(f"[DEBUG] Starting agent {agent_to_run.id} ({agent_to_run.name}/{agent_to_run.role}) after {d_delay}s delay")
+                await agent_to_run.run_conversation(p_task, bb, max_turns=sys.maxsize)
 
         agent_tasks.append(asyncio.create_task(delayed_start(agent_instance, prompt_for_agent, delay)))
 
     # --- Run All Tasks ---
     try:
         print("[INFO] All agents started with staggered timing for stability. Simulation running...")
-        await asyncio.gather(*agent_tasks, metrics_task)
+        print("[INFO] Press Ctrl+C to safely shutdown the simulation.")
+        await asyncio.gather(*agent_tasks, metrics_task, return_exceptions=True)
     except KeyboardInterrupt:
-        print("\nCtrl+C pressed. Safely stopping simulation...")
+        print("\n[INFO] KeyboardInterrupt caught. Initiating graceful shutdown...")
+        shutdown_requested = True
     except Exception as e:
         print(f"\n[ERROR] An error occurred during simulation execution: {e}")
+        shutdown_requested = True
     finally:
+        print("\n[INFO] Shutting down simulation...")
+        
+        # エージェントにシャットダウンを通知
+        for agent in agents:
+            if hasattr(agent, 'shutdown'):
+                agent.shutdown()
+        
         print("Cancelling outstanding tasks...")
-        for task_item in [controller_task, metrics_task, *agent_tasks]:
+        tasks_to_cancel = [controller_task, metrics_task, *agent_tasks]
+        for task_item in tasks_to_cancel:
             if task_item and not task_item.done():
                 task_item.cancel()
-                try:
-                    await task_item
-                except asyncio.CancelledError:
-                    task_name = task_item.get_name() if hasattr(task_item, 'get_name') else 'Unnamed task'
-                    print(f"Task {task_name} was cancelled.")
-                except Exception as e_cancel:
-                    print(f"Error cancelling task: {e_cancel}")
+        
+        # タスクの完了を待機
+        if tasks_to_cancel:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*[t for t in tasks_to_cancel if t and not t.done()], return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                print("[WARNING] Some tasks did not complete within timeout.")
 
         print("Cleanup complete.")
         print(f"[SUMMARY] Total simulation steps: {step_counter}, Total logs recorded: {len(simulation_logs)}")
@@ -387,4 +490,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-```
+repr("")

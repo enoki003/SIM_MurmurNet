@@ -270,6 +270,7 @@ class SLMAgent:
         self.model_wrapper = model
         self.tokenizer = tokenizer
         self.cache: Dict[str, Any] = {}
+        self.shutdown_flag = False  # シャットダウンフラグを追加
         print(f"[DEBUG] Agent {id} ({self.name}/{self.role}) initialized.")
 
     def _build_role_specific_prompt(self, base_task_prompt: str, conversation_history: List[Dict[str, Any]]) -> str:
@@ -284,25 +285,30 @@ class SLMAgent:
         Returns:
             str: The fully constructed prompt for the LLM.
         """
-        instruction = "You are a helpful AI agent participating in a discussion. Please provide a thoughtful and constructive response based on the current task and conversation history."
+        instruction = "You are an AI agent in a discussion. Provide a thoughtful response."
 
         prompt_parts = [instruction]
 
         if conversation_history:
             formatted_history = []
-            for msg in conversation_history[-5:]:
+            # Limit to only the last 2 messages to keep prompt short
+            for msg in conversation_history[-2:]:
                 if isinstance(msg, dict):
-                    sender_name = msg.get("agent_name", msg.get("name", "Unknown"))
-                    sender_role = msg.get("role", "")
-                    text_content = msg.get("text", str(msg))
-                    formatted_history.append(f"{sender_name}({sender_role}): {text_content}")
+                    sender_name = msg.get("agent_name", "Agent")
+                    text_content = msg.get("text", "")
+                    # Truncate long messages
+                    if len(text_content) > 100:
+                        text_content = text_content[:100] + "..."
+                    formatted_history.append(f"{sender_name}: {text_content}")
                 else:
-                    formatted_history.append(str(msg))
+                    formatted_history.append(str(msg)[:100])
             if formatted_history:
-                prompt_parts.append("これまでの会話 (Recent Conversation):\n" + "\n".join(formatted_history))
+                prompt_parts.append("Recent:\n" + "\n".join(formatted_history))
 
-        prompt_parts.append(f"現在のタスク (Current Task): {base_task_prompt}")
-        prompt_parts.append(f"あなた ({self.role}) としての応答 (Your response as {self.role}):")
+        # Truncate the task prompt if it's too long
+        task_prompt = base_task_prompt[:200] + "..." if len(base_task_prompt) > 200 else base_task_prompt
+        prompt_parts.append(f"Task: {task_prompt}")
+        prompt_parts.append("Your response:")
 
         final_prompt = "\n\n".join(prompt_parts)
         return final_prompt
@@ -322,7 +328,13 @@ class SLMAgent:
         print(f"[DEBUG] Agent {self.id} ({self.name}/{self.role}) starting conversation (max_turns: {max_turns}, initial_task: '{current_task_prompt:.50}...')")
         try:
             for turn in range(max_turns):
-                conversation_history = await bb.pull_messages_raw(k=10)
+                # シャットダウンフラグをチェック
+                if self.shutdown_flag:
+                    print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) received shutdown signal, stopping conversation.")
+                    break
+                    
+                # Limit conversation history to reduce context usage
+                conversation_history = await bb.pull_messages_raw(k=3)
                 prompt_for_llm = self._build_role_specific_prompt(current_task_prompt, conversation_history)
                 response = await self._generate_response(prompt_for_llm)
                 
@@ -336,9 +348,18 @@ class SLMAgent:
                 else:
                     print(f"[WARNING] Agent {self.id} ({self.name}/{self.role}) generated empty response at turn {turn}")
 
+                # シャットダウンフラグを再チェック（スリープ前）
+                if self.shutdown_flag:
+                    print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) received shutdown signal, stopping conversation.")
+                    break
+                    
                 await asyncio.sleep(random.uniform(2.0, 5.0))
+        except asyncio.CancelledError:
+            print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) conversation cancelled gracefully.")
         except Exception as e:
             print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) conversation failed: {e}")
+        finally:
+            print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) conversation ended.")
 
     async def _generate_response(self, prompt: str) -> str:
         """Generates a response from the LLM, using a global semaphore for model access."""
@@ -346,15 +367,26 @@ class SLMAgent:
         async with _model_semaphore:
             try:
                 loop = asyncio.get_event_loop()
-                generate_kwargs = {
-                    "prompt": prompt, "max_tokens": 150, "temperature": 0.7,
-                    "top_p": 0.9, "repeat_penalty": 1.1
-                }
-                response = await loop.run_in_executor(None, self.model_wrapper.generate, **generate_kwargs)
+                # Fix: Use partial function to pass keyword arguments properly
+                from functools import partial
+                generate_func = partial(
+                    self.model_wrapper.generate,
+                    prompt,  # Pass prompt as positional argument
+                    max_tokens=150,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repeat_penalty=1.1
+                )
+                response = await loop.run_in_executor(None, generate_func)
                 return response
             except Exception as e:
                 print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) generation failed: {e}")
                 return f"[ERROR] Agent response generation error: {e}"
+
+    def shutdown(self):
+        """エージェントの安全なシャットダウンを開始"""
+        self.shutdown_flag = True
+        print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) shutdown initiated.")
 
     def generate(self, prompt: str, **kwargs) -> str: # Sync version for compatibility or testing
         """Synchronous version of text generation for compatibility or testing."""
@@ -390,5 +422,3 @@ def sample_top_p(logits: np.ndarray, p: float = 0.9) -> int:
     except Exception as e:
         print(f"[WARNING] Top-p sampling failed: {e}, using greedy selection (argmax).")
         return np.argmax(logits)
-
-```

@@ -283,4 +283,3 @@ class BlackBoard:
             print(f"Error getting topic summary: {e}")
             return ""
 
-```

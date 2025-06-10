@@ -218,5 +218,3 @@ class BoidsLogitsProcessor(LogitsProcessor):
             return scores_tensor.cpu().numpy()
         else:
             return scores_tensor
-
-```

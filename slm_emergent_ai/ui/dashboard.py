@@ -575,11 +575,11 @@ class Dashboard:
                     "vdi": 0.7,
                     "fcr": 0.9,
                     "speed": 15.0,
-                    "lambda": {
+                    "lambda": dict[str, float]({
                         "a": 0.3,
                         "c": 0.3,
                         "s": 0.1
-                    }
+                    })
                 }
                 
                 # メッセージからメトリクス情報を抽出
@@ -639,14 +639,6 @@ class Dashboard:
                      "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0 }
 
     async def _fetch_blackboard(self) -> Dict[str, Any]:
-                "lambda": {
-                    "a": 0.3,
-                    "c": 0.3,
-                    "s": 0.1
-                }
-            }
-    
-    async def _fetch_blackboard(self) -> Dict[str, Any]:
         """BlackBoardの情報を取得"""
         try:
             if self.bb:
@@ -684,7 +676,7 @@ class Dashboard:
                             # トークン番号だけの文字列は除外
                             if msg.startswith('token_') and len(msg) < 20:
                                 continue
-                                
+                            
                             formatted_messages.append({
                                 'agent_id': f'Agent {i % 5 + 1}',  # 5つのエージェントIDを循環
                                 'text': str(msg),
@@ -698,7 +690,7 @@ class Dashboard:
                         'text': 'エージェントの会話がまだ開始されていません。',
                         'timestamp': __import__('time').strftime("%H:%M:%S")
                     })
-                  # 最新のメッセージを先頭に
+                # 最新のメッセージを先頭に
                 formatted_messages.reverse()
                 
                 return {"messages": formatted_messages}

@@ -43,6 +43,9 @@ def calculate_vdi(tokens: List[int], window_size: int = 100) -> float:
     --------
     VDI*値
     """
+    if not tokens:
+        return 0.0
+    
     # 最新のwindow_size個のトークンを使用
     recent_tokens = tokens[-window_size:] if len(tokens) > window_size else tokens
     
@@ -52,8 +55,11 @@ def calculate_vdi(tokens: List[int], window_size: int = 100) -> float:
     # 総トークン数を計算
     total_tokens = len(recent_tokens)
     
+    if total_tokens == 0:
+        return 0.0
+    
     # VDI*を計算
-    vdi = unique_tokens / (np.log(total_tokens) + 1) if total_tokens > 0 else 0
+    vdi = unique_tokens / (np.log(total_tokens) + 1)
     
     return vdi
 
@@ -74,6 +80,40 @@ def calculate_fcr(fact_checks: List[bool]) -> float:
         return 1.0  # 事実チェックがない場合は満点
     
     return sum(fact_checks) / len(fact_checks)
+
+
+def calculate_response_diversity_fcr(messages: List[str]) -> float:
+    """
+    応答の多様性に基づくFCRを計算（代替実装）
+    
+    Parameters:
+    -----------
+    messages: メッセージのリスト
+    
+    Returns:
+    --------
+    多様性に基づくFCR値（0.0-1.0）
+    """
+    if not messages or len(messages) < 2:
+        return 1.0
+    
+    # メッセージの重複を確認
+    unique_messages = set()
+    total_messages = 0
+    
+    for msg in messages:
+        if isinstance(msg, str) and len(msg.strip()) > 10:
+            # 最初の50文字で類似性を判定
+            msg_signature = msg.strip()[:50].lower()
+            unique_messages.add(msg_signature)
+            total_messages += 1
+    
+    if total_messages == 0:
+        return 1.0
+    
+    # 多様性比率を計算
+    diversity_ratio = len(unique_messages) / total_messages
+    return min(diversity_ratio, 1.0)
 
 
 def calculate_speed(times: List[float], token_counts: List[int]) -> float:
