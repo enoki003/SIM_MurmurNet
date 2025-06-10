@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 from transformers import LogitsProcessor # Actual import
 from ..llm_extensions.boids_logits_processor import BoidsLogitsProcessor
+from ..llm_extensions.gguf_boids_logits_processor_wrapper import GGUFBoidsLogitsProcessorWrapper
+from llama_cpp import LogitsProcessorList # For GGUF Logits Processing
 
 # Global semaphore to control simultaneous access to the model, preventing resource contention.
 _model_semaphore = asyncio.Semaphore(1)
@@ -110,18 +112,48 @@ class LLM:
         """Initializes a GGUF model using llama-cpp-python."""
         try:
             from llama_cpp import Llama
+            # GGUFBoidsLogitsProcessorWrapper is imported at the top
+            # LogitsProcessorList is imported at the top
+
             if not os.path.exists(self.model_path):
                 raise FileNotFoundError(f"GGUF model file not found: {self.model_path}")
             print(f"Loading GGUF model: {self.model_path}")
-            self.model = Llama(
+            self.model = Llama( # This is the llama_cpp.Llama instance
                 model_path=self.model_path, n_threads=self.threads,
                 n_ctx=self.n_ctx, verbose=False,
+                logits_all=True # Important: For logits_processor to receive logits
             )
-            self.tokenizer = None
+            self.tokenizer = None # Stays None for GGUF in terms of HF tokenizer
             print(f"GGUF model loaded successfully (threads: {self.threads}, context: {self.n_ctx})")
+
             if self.boids_enabled:
-                self.boids_processor = None
-                print("[WARNING] BoidsLogitsProcessor is currently not supported for GGUF models. Boids processing will be skipped.")
+                try:
+                    print("[INFO] Attempting to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model...")
+                    self.boids_processor = GGUFBoidsLogitsProcessorWrapper(
+                        gguf_model=self.model,
+                        hf_tokenizer_for_cohesion=None, # Passing None for now, self.tokenizer is None for GGUF
+                        w_align=self.w_align,
+                        w_sep=self.w_sep,
+                        w_cohesion=self.w_cohesion,
+                        n_align_tokens=self.n_align_tokens,
+                        m_sep_tokens=self.m_sep_tokens,
+                        theta_sep=self.theta_sep,
+                        cohesion_prompt_text=self.cohesion_prompt_text,
+                        device='cpu'
+                    )
+                    if self.boids_processor and hasattr(self.boids_processor, 'boids_processor_internal') and self.boids_processor.boids_processor_internal is not None:
+                        print("[INFO] GGUFBoidsLogitsProcessorWrapper initialized successfully for GGUF model.")
+                    else:
+                        # This condition implies GGUFBoidsLogitsProcessorWrapper was created, but its internal BoidsLogitsProcessor might have failed.
+                        print("[WARNING] GGUFBoidsLogitsProcessorWrapper created, but its internal BoidsLogitsProcessor may not have initialized correctly. Boids rules might be skipped if internal processor is None.")
+                        if not self.boids_processor: # If wrapper itself failed to init
+                             self.boids_processor = None # Ensure it's None
+                except Exception as e:
+                    print(f"[WARNING] Failed to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model: {e}. Boids processing will be skipped.")
+                    self.boids_processor = None
+            else:
+                self.boids_processor = None # Ensure it's None if not enabled
+
         except ImportError:
             raise ImportError("llama-cpp-python is required for GGUF models. Install with: pip install llama-cpp-python")
         except Exception as e:
@@ -201,18 +233,33 @@ class LLM:
 
         formatted_prompt = self._format_gemma_prompt(prompt) if self._is_gemma_model() else prompt
 
-        if hasattr(self.model, "create_completion"):
+        if hasattr(self.model, "create_completion"): # GGUF model
             try:
+                # LogitsProcessorList is imported at the top
+
+                active_logits_processors = []
+                # internal_logits_processors was previously defined, but GGUF needs specific handling
+                if self.boids_enabled and self.boids_processor:
+                    print("[DEBUG] LLM.generate: Adding GGUF Boids processor to list for GGUF model.")
+                    active_logits_processors.append(self.boids_processor) # self.boids_processor is the GGUF wrapper
+
+                final_logits_processor_arg = LogitsProcessorList(active_logits_processors) if active_logits_processors else None
+
                 stop_sequences = stop or []
-                if self._is_gemma_model(): stop_sequences = list(set(stop_sequences + ["<end_of_turn>"]))
+                if self._is_gemma_model(): # This check might need refinement for GGUF Gemma
+                    stop_sequences = list(set(stop_sequences + ["<end_of_turn>"]))
+
                 response = self.model.create_completion(
                     prompt=formatted_prompt,
-                    max_tokens=max_tokens, temperature=temperature, top_p=top_p,
-                    repeat_penalty=repeat_penalty, stop=stop_sequences,
-                    logits_processor=internal_logits_processors if internal_logits_processors else None
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    stop=stop_sequences,
+                    logits_processor=final_logits_processor_arg
                 )
                 text = response["choices"][0]["text"]
-                if self._is_gemma_model():
+                if self._is_gemma_model(): # This check might need refinement for GGUF Gemma
                     for tag in ["<end_of_turn>", "<start_of_turn>", "model\n", "user\n"]: text = text.replace(tag, "")
                 return text.strip()
             except Exception as e:

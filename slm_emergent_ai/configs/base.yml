@@ -7,7 +7,7 @@ model:
   quantize: "q4"     # 量子化レベル (Note: may not apply directly to HF transformers loading)
   n_ctx: 2048        # コンテキスト長を2048に増加（元: 512）
   boids_logits_params: # BoidsLogitsProcessor parameters moved under model
-    enabled: false    # GGUFモデルではBoidsLogitsProcessorは現在サポートされていないため無効化
+    enabled: true    # Enable Boids for GGUF (experimental)
     w_align: 0.05                # Alignment weight (reduced from 0.1)
     w_sep: 0.3                   # Separation weight (increased from 0.2)
     w_cohesion: 0.1              # Cohesion weight (reduced from 0.15)
