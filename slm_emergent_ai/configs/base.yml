@@ -3,20 +3,18 @@
 
 # SLM Emergent AI 基本設定
 model:
-  path: "google/gemma-3-1b-it"  # HuggingFace model for full Boids functionality
-  quantize: "q4"     # 量子化レベル (Note: may not apply directly to HF transformers loading)
-  n_ctx: 2048        # コンテキスト長を2048に増加（元: 512）
+  path: "google/gemma-3-1b-it"  # Changed to user's preferred HF model ID
+  quantize: "q4"     # Quantization may not apply for HF, or is handled differently
+  n_ctx: 1024        # Context length
   boids_logits_params: # BoidsLogitsProcessor parameters moved under model
-    enabled: true    # Enable Boids with full functionality
-    w_align: 0.1                 # Alignment weight (full semantic alignment)
-    w_sep: 0.2                   # Separation weight (semantic diversity)
-    w_cohesion: 0.15             # Cohesion weight (semantic cohesion)
-    n_align_tokens: 10           # Number of recent tokens for alignment vector
-    m_sep_tokens: 10             # Number of recent tokens for separation check
-    theta_sep: 0.85              # Separation similarity threshold
-    cohesion_prompt_text: "Focus on collaborative problem solving, shared understanding, and innovative ideas."   # Cohesion guidance text
-    
-    # Note: Full Boids functionality with semantic embeddings available for HuggingFace models
+    enabled: true    # Enable Boids for GGUF (experimental)
+    w_align: 0.05
+    w_sep: 0.3
+    w_cohesion: 0.1
+    n_align_tokens: 5           # Reduced from 15
+    m_sep_tokens: 5           # Reduced from 15
+    theta_sep: 0.80
+    cohesion_prompt_text: "Focus on collaborative problem solving, shared understanding, and innovative ideas."
 
 agent:
   n: 3               # エージェント数

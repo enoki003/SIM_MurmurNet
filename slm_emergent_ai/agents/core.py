@@ -129,18 +129,6 @@ class LLM:
             if self.boids_enabled:
                 try:
                     print("[INFO] Attempting to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model...")
-                    
-                    # GGUF時はcohesion_prompt_textを強制的にオフにする
-                    cohesion_text_for_gguf = None
-                    if self.cohesion_prompt_text is not None:
-                        print("[WARNING] GGUF mode detected: cohesion_prompt_text is not supported and will be disabled.")
-                        print(f"[WARNING] Original cohesion_prompt_text was: '{self.cohesion_prompt_text[:100]}...'")
-                    
-                    # w_cohesionが0より大きい場合も警告
-                    if self.w_cohesion > 0:
-                        print(f"[WARNING] GGUF mode: w_cohesion ({self.w_cohesion}) > 0 may not work properly without embedding matrix access.")
-                        print("[WARNING] Consider setting w_cohesion to 0 in config for GGUF models.")
-                    
                     self.boids_processor = GGUFBoidsLogitsProcessorWrapper(
                         gguf_model=self.model,
                         hf_tokenizer_for_cohesion=None, # Passing None for now, self.tokenizer is None for GGUF
@@ -150,7 +138,7 @@ class LLM:
                         n_align_tokens=self.n_align_tokens,
                         m_sep_tokens=self.m_sep_tokens,
                         theta_sep=self.theta_sep,
-                        cohesion_prompt_text=cohesion_text_for_gguf,  # Always None for GGUF
+                        cohesion_prompt_text=self.cohesion_prompt_text,
                         device='cpu'
                     )
                     if self.boids_processor and hasattr(self.boids_processor, 'boids_processor_internal') and self.boids_processor.boids_processor_internal is not None:
@@ -177,19 +165,10 @@ class LLM:
             from transformers import AutoModelForCausalLM, AutoTokenizer
             print(f"Loading HF model: {self.model_path}")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-            
-            # Remove device_map="auto" to avoid accelerate dependency
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path, 
-                low_cpu_mem_usage=True,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+                self.model_path, low_cpu_mem_usage=True, device_map="auto"
             )
-            
-            # Move model to appropriate device
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.model = self.model.to(device)
-            
-            model_device = str(self.model.device if hasattr(self.model, 'device') else device)
+            model_device = str(self.model.device if hasattr(self.model, 'device') else 'cpu')
             print(f"HF model loaded successfully on device: {model_device}")
 
             if self.boids_enabled:

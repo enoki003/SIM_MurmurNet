@@ -1,8 +1,8 @@
 import torch
-import numpy as np
-from typing import Optional, Any
 from transformers import LogitsProcessor, PreTrainedModel, PreTrainedTokenizerBase
+from typing import Optional, List
 import torch.nn.functional as F
+import numpy as np
 
 class BoidsLogitsProcessor(LogitsProcessor):
     """
@@ -54,19 +54,31 @@ class BoidsLogitsProcessor(LogitsProcessor):
         self.external_tokenizer_ref = external_tokenizer # Store the external one
         self.tokenizer = external_tokenizer if external_tokenizer is not None else tokenizer # Effective tokenizer
         self.is_gguf_mode = is_gguf_mode
+        self.device = device # Ensure device is set before using it for embedding_matrix
 
-        # Validation for model/embedding_matrix
-        if not self.model and not self.external_embedding_matrix:
-            # If is_gguf_mode is true, self.model might be LlamaCpp model, not PreTrainedModel.
-            # BoidsLogitsProcessor might still be usable if external_embedding_matrix is provided
-            # AND _get_token_embeddings can be adapted for GGUF's self.model.embed().
-            # For now, the critical part is the embedding_matrix for vocab-wide similarities.
-            if not self.is_gguf_mode: # Stricter check if not GGUF mode
-                 raise ValueError("A Hugging Face PreTrainedModel ('model') or an 'external_embedding_matrix' must be provided if not in GGUF mode.")
-            elif not self.external_embedding_matrix: # In GGUF mode, external_embedding_matrix is essential for rules requiring vocab-wide similarity.
-                 print("[BoidsLogitsProcessor] Warning: In GGUF mode, 'external_embedding_matrix' is not provided. Rules requiring vocab-wide similarity will be skipped.")
-        elif self.model and not isinstance(self.model, PreTrainedModel) and not self.is_gguf_mode:
-             raise ValueError("BoidsLogitsProcessor requires a Hugging Face PreTrainedModel instance for 'model' when not in GGUF mode.")
+        self.embedding_matrix: Optional[torch.Tensor] = None
+        if self.external_embedding_matrix is not None:
+            self.embedding_matrix = self.external_embedding_matrix.to(self.device)
+            print("[BoidsLogitsProcessor] Using provided external_embedding_matrix.")
+        elif isinstance(self.model, PreTrainedModel) and hasattr(self.model, 'get_input_embeddings') and self.model.get_input_embeddings() is not None:
+            try:
+                self.embedding_matrix = self.model.get_input_embeddings().weight.detach().clone().to(self.device) # Added .clone()
+                print("[BoidsLogitsProcessor] Successfully fetched and stored embedding_matrix from model.")
+            except Exception as e:
+                print(f"[BoidsLogitsProcessor] Error fetching embedding_matrix from model: {e}. It will remain None.")
+        else:
+            if not self.is_gguf_mode: # Only warn if not GGUF mode and no other source
+                 print("[BoidsLogitsProcessor] Warning: Embedding matrix could not be obtained from model and no external one was provided. Rules requiring it will be skipped.")
+            # For GGUF mode, this is expected if no external_embedding_matrix is passed.
+            # The BoidsLogitsProcessor's own warning about missing external_embedding_matrix in GGUF mode should cover this.
+
+        # Validation for model/embedding_matrix (adjusted)
+        if not self.model and not self.embedding_matrix and not self.is_gguf_mode:
+            raise ValueError("A Hugging Face PreTrainedModel ('model') that provides embeddings or an 'external_embedding_matrix' must be provided if not in GGUF mode and no internal matrix could be derived.")
+        elif self.is_gguf_mode and not self.embedding_matrix : # Check effective embedding_matrix
+             print("[BoidsLogitsProcessor] Warning: In GGUF mode, and no 'external_embedding_matrix' was effectively used/provided (self.embedding_matrix is None). Rules requiring vocab-wide similarity will be skipped.")
+        elif self.model and not isinstance(self.model, PreTrainedModel) and not self.is_gguf_mode: # Original check for HF model type
+             raise ValueError("BoidsLogitsProcessor requires a Hugging Face PreTrainedModel instance for 'model' when not in GGUF mode and not using external_embedding_matrix.")
 
 
         if cohesion_prompt_text and not self.tokenizer:
@@ -82,7 +94,7 @@ class BoidsLogitsProcessor(LogitsProcessor):
         self.m_sep_tokens = m_sep_tokens
         self.theta_sep = theta_sep
         self.cohesion_prompt_text = cohesion_prompt_text
-        self.device = device
+        # self.device = device # Moved up
         self.v_cohesion: Optional[torch.Tensor] = None
 
         if self.cohesion_prompt_text and self.tokenizer:
@@ -142,7 +154,7 @@ class BoidsLogitsProcessor(LogitsProcessor):
         try:
             inputs = self.tokenizer(
                 self.cohesion_prompt_text, return_tensors="pt", padding=True, truncation=True,
-                max_length=self.tokenizer.model_max_length if hasattr(self.tokenizer, 'model_max_length') and self.tokenizer.model_max_length else 512
+                max_length=getattr(self.tokenizer, 'model_max_length', 512) # Use getattr for safety
             )
             input_ids_tensor = inputs.input_ids.to(self.device)
             if input_ids_tensor.numel() == 0:
@@ -163,7 +175,7 @@ class BoidsLogitsProcessor(LogitsProcessor):
             print(f"[BoidsLogitsProcessor] Error pre-calculating cohesion vector due to unimplemented path: {nie}. Cohesion disabled.")
             self.v_cohesion = None
         except Exception as e:
-            print(f"[BoidsLogitsProcessor] Error pre-calculating cohesion vector: {e}. Cohesion disabled.")
+            print(f"[BoidsLogitsProcessor] Error during cohesion vector calculation for prompt '{self.cohesion_prompt_text[:50]}...': {type(e).__name__} - {str(e)}. Cohesion disabled.")
             self.v_cohesion = None
 
     def _cosine_similarity(self, v1: torch.Tensor, v2: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -196,22 +208,8 @@ class BoidsLogitsProcessor(LogitsProcessor):
 
         batch_size, vocab_size = scores_tensor.shape
 
-        embedding_matrix = None
-        if self.external_embedding_matrix is not None:
-            embedding_matrix = self.external_embedding_matrix.to(current_processing_device)
-            # print("[BOIDS_DEBUG] Using external_embedding_matrix.")
-        elif isinstance(self.model, PreTrainedModel) and hasattr(self.model, 'get_input_embeddings') and self.model.get_input_embeddings() is not None:
-            try:
-                embedding_matrix = self.model.get_input_embeddings().weight.detach().to(current_processing_device)
-                # print("[BOIDS_DEBUG] Using model.get_input_embeddings().weight.")
-            except Exception as e:
-                print(f"[BOIDS_DEBUG] Error getting embedding matrix from model: {e}")
-        else:
-            # This case can happen in GGUF mode if external_embedding_matrix is not provided.
-            # self.model might be a LlamaCPP model instance.
-            # We don't raise an error here, but rules below will be skipped.
-            pass # print("[BOIDS_DEBUG] Embedding matrix not available for general vocab operations.")
-
+        # embedding_matrix is now self.embedding_matrix, populated in __init__
+        # The local variable `embedding_matrix` is removed from here.
 
         for i in range(batch_size):
             current_sequence_input_ids = input_ids_tensor[i]
@@ -222,9 +220,12 @@ class BoidsLogitsProcessor(LogitsProcessor):
 
             # --- Alignment ---
             if self.w_align != 0 and self.n_align_tokens > 0 and len(current_sequence_input_ids) > 0:
-                if embedding_matrix is None:
-                    print(f"[BOIDS_DEBUG] Alignment: Skipped (embedding_matrix not available).")
-                else:
+                if self.embedding_matrix is None:
+                    if not self.is_gguf_mode: # Stricter warning if not GGUF and matrix is missing
+                        print(f"[BOIDS_DEBUG] Alignment: Skipped (embedding_matrix not available).")
+                    else: # Expected for GGUF without external matrix
+                        print(f"[BOIDS_DEBUG] Alignment: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
+                else: # Proceed if embedding_matrix exists
                     align_token_ids = current_sequence_input_ids[-self.n_align_tokens:]
                     if align_token_ids.numel() > 0:
                         try:
@@ -232,14 +233,14 @@ class BoidsLogitsProcessor(LogitsProcessor):
                             if v_align_tokens_embeddings.numel() > 0 and v_align_tokens_embeddings.shape[0] > 0 :
                                 v_align = torch.mean(v_align_tokens_embeddings, dim=0) if v_align_tokens_embeddings.ndim > 1 else v_align_tokens_embeddings
                                 v_align = F.normalize(v_align, p=2, dim=0)
-                                align_similarities = self._cosine_similarity(v_align, embedding_matrix)
+                                align_similarities = self._cosine_similarity(v_align, self.embedding_matrix)
                                 alignment_bias = self.w_align * align_similarities
                                 scores_tensor[i] += alignment_bias
                                 print(f"[BOIDS_DEBUG] Alignment: Applied. Avg bias: {alignment_bias.mean().item():.4f}, Max bias: {alignment_bias.max().item():.4f}, Min bias: {alignment_bias.min().item():.4f}")
                             else:
                                 print(f"[BOIDS_DEBUG] Alignment: Skipped (no valid embeddings for align_token_ids).")
                         except Exception as e:
-                             print(f"[BOIDS_DEBUG] Alignment: Skipped due to error in _get_token_embeddings: {e}")
+                             print(f"[BOIDS_DEBUG] Alignment: Skipped due to error: {e}") # General error catch
                     else:
                         print(f"[BOIDS_DEBUG] Alignment: Skipped (no align_token_ids).")
             else:
@@ -248,9 +249,12 @@ class BoidsLogitsProcessor(LogitsProcessor):
 
             # --- Separation ---
             if self.w_sep != 0 and self.m_sep_tokens > 0 and len(current_sequence_input_ids) > 0:
-                if embedding_matrix is None:
-                    print(f"[BOIDS_DEBUG] Separation: Skipped (embedding_matrix not available).")
-                else:
+                if self.embedding_matrix is None:
+                    if not self.is_gguf_mode:
+                        print(f"[BOIDS_DEBUG] Separation: Skipped (embedding_matrix not available).")
+                    else:
+                        print(f"[BOIDS_DEBUG] Separation: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
+                else: # Proceed if embedding_matrix exists
                     sep_token_ids = current_sequence_input_ids[-self.m_sep_tokens:]
                     if sep_token_ids.numel() > 0:
                         try:
@@ -258,7 +262,7 @@ class BoidsLogitsProcessor(LogitsProcessor):
                             if history_embeddings.numel() > 0 and history_embeddings.shape[0] > 0:
                                 if history_embeddings.ndim == 1: history_embeddings = history_embeddings.unsqueeze(0) # Ensure 2D
                                 if history_embeddings.ndim == 2: # Should always be true now
-                                    norm_embedding_matrix = F.normalize(embedding_matrix, p=2, dim=1)
+                                    norm_embedding_matrix = F.normalize(self.embedding_matrix, p=2, dim=1)
                                     norm_history_embeddings = F.normalize(history_embeddings, p=2, dim=1)
                                     all_sims_to_history = torch.matmul(norm_embedding_matrix, norm_history_embeddings.transpose(0, 1))
                                     max_similarity_to_history, _ = torch.max(all_sims_to_history, dim=1)
@@ -275,11 +279,11 @@ class BoidsLogitsProcessor(LogitsProcessor):
                                     else:
                                         print(f"[BOIDS_DEBUG] Separation: No tokens exceeded theta_sep ({self.theta_sep:.2f}). Max similarity found: {max_similarity_to_history.max().item() if max_similarity_to_history.numel() > 0 else 'N/A':.4f}.")
                                 else:
-                                    print(f"[BOIDS_DEBUG] Separation: Skipped (history_embeddings not 2D after processing).") # Should not happen if unsqueeze works
+                                    print(f"[BOIDS_DEBUG] Separation: Skipped (history_embeddings not 2D after processing).")
                             else:
                                 print(f"[BOIDS_DEBUG] Separation: Skipped (no valid embeddings for sep_token_ids).")
                         except Exception as e:
-                            print(f"[BOIDS_DEBUG] Separation: Skipped due to error in _get_token_embeddings: {e}")
+                            print(f"[BOIDS_DEBUG] Separation: Skipped due to error: {e}") # General error catch
                     else:
                         print(f"[BOIDS_DEBUG] Separation: Skipped (no sep_token_ids).")
             else:
@@ -288,11 +292,14 @@ class BoidsLogitsProcessor(LogitsProcessor):
 
             # --- Cohesion ---
             if self.w_cohesion != 0 and self.v_cohesion is not None and self.v_cohesion.numel() > 0:
-                if embedding_matrix is None:
-                    print(f"[BOIDS_DEBUG] Cohesion: Skipped (embedding_matrix not available).")
-                else:
+                if self.embedding_matrix is None:
+                    if not self.is_gguf_mode:
+                        print(f"[BOIDS_DEBUG] Cohesion: Skipped (embedding_matrix not available).")
+                    else:
+                        print(f"[BOIDS_DEBUG] Cohesion: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
+                else: # Proceed if embedding_matrix exists
                     v_cohesion_on_device = self.v_cohesion.to(current_processing_device)
-                    cohesion_similarities = self._cosine_similarity(v_cohesion_on_device, embedding_matrix)
+                    cohesion_similarities = self._cosine_similarity(v_cohesion_on_device, self.embedding_matrix)
                     cohesion_bias = self.w_cohesion * cohesion_similarities
                     scores_tensor[i] += cohesion_bias
                     print(f"[BOIDS_DEBUG] Cohesion: Applied. Avg bias: {cohesion_bias.mean().item():.4f}, Max bias: {cohesion_bias.max().item():.4f}, Min bias: {cohesion_bias.min().item():.4f}")
