@@ -187,29 +187,18 @@ class BoidsLogitsProcessor(LogitsProcessor):
         return F.cosine_similarity(v1, v2, dim=-1, eps=eps)
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        original_type_is_numpy = isinstance(scores, np.ndarray)
-        current_processing_device = self.device
-        if original_type_is_numpy:
-            input_ids_np = input_ids # Keep original if needed for logging
-            if not isinstance(input_ids, torch.Tensor):
-                # Handle list of lists or simple list for input_ids from NumPy context
-                if input_ids and isinstance(input_ids, np.ndarray):
-                     input_ids_tensor = torch.from_numpy(input_ids).long().to(current_processing_device)
-                elif input_ids and isinstance(input_ids[0], list): # batch of lists
-                     input_ids_tensor = torch.LongTensor(input_ids).to(current_processing_device)
-                else: # single list for batch size 1
-                     input_ids_tensor = torch.LongTensor([input_ids]).to(current_processing_device)
-            else:
-                input_ids_tensor = input_ids.to(current_processing_device)
-            scores_tensor = torch.from_numpy(scores.astype(np.float32)).to(current_processing_device)
-        else:
-            input_ids_tensor = input_ids.to(current_processing_device)
-            scores_tensor = scores.to(current_processing_device)
+        # Assuming inputs are PyTorch tensors for HF models
+        current_processing_device = self.device # self.device should be set in __init__
+        input_ids_tensor = input_ids.to(current_processing_device)
+        scores_tensor = scores.to(current_processing_device)
 
         batch_size, vocab_size = scores_tensor.shape
 
-        # embedding_matrix is now self.embedding_matrix, populated in __init__
-        # The local variable `embedding_matrix` is removed from here.
+        if self.embedding_matrix is None:
+            if not self.is_gguf_mode: # Only log warning if not GGUF mode (where it might be expected)
+                print("[BoidsLogitsProcessor] Warning: Embedding matrix is None. Skipping Boids rules application.")
+            # For GGUF mode, this is logged during __init__ if matrix is missing.
+            return scores_tensor # Return original scores if no embedding matrix
 
         for i in range(batch_size):
             current_sequence_input_ids = input_ids_tensor[i]
@@ -220,93 +209,87 @@ class BoidsLogitsProcessor(LogitsProcessor):
 
             # --- Alignment ---
             if self.w_align != 0 and self.n_align_tokens > 0 and len(current_sequence_input_ids) > 0:
-                if self.embedding_matrix is None:
-                    if not self.is_gguf_mode: # Stricter warning if not GGUF and matrix is missing
-                        print(f"[BOIDS_DEBUG] Alignment: Skipped (embedding_matrix not available).")
-                    else: # Expected for GGUF without external matrix
-                        print(f"[BOIDS_DEBUG] Alignment: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
-                else: # Proceed if embedding_matrix exists
-                    align_token_ids = current_sequence_input_ids[-self.n_align_tokens:]
-                    if align_token_ids.numel() > 0:
-                        try:
-                            v_align_tokens_embeddings = self._get_token_embeddings(align_token_ids)
-                            if v_align_tokens_embeddings.numel() > 0 and v_align_tokens_embeddings.shape[0] > 0 :
-                                v_align = torch.mean(v_align_tokens_embeddings, dim=0) if v_align_tokens_embeddings.ndim > 1 else v_align_tokens_embeddings
-                                v_align = F.normalize(v_align, p=2, dim=0)
-                                align_similarities = self._cosine_similarity(v_align, self.embedding_matrix)
-                                alignment_bias = self.w_align * align_similarities
-                                scores_tensor[i] += alignment_bias
-                                print(f"[BOIDS_DEBUG] Alignment: Applied. Avg bias: {alignment_bias.mean().item():.4f}, Max bias: {alignment_bias.max().item():.4f}, Min bias: {alignment_bias.min().item():.4f}")
-                            else:
-                                print(f"[BOIDS_DEBUG] Alignment: Skipped (no valid embeddings for align_token_ids).")
-                        except Exception as e:
-                             print(f"[BOIDS_DEBUG] Alignment: Skipped due to error: {e}") # General error catch
-                    else:
-                        print(f"[BOIDS_DEBUG] Alignment: Skipped (no align_token_ids).")
-            else:
-                print(f"[BOIDS_DEBUG] Alignment: Skipped (w_align is 0 or n_align_tokens is 0 or no input tokens).")
+                # self.embedding_matrix is already checked to be not None at the start of __call__
+                align_token_ids = current_sequence_input_ids[-self.n_align_tokens:]
+                if align_token_ids.numel() > 0:
+                    try:
+                        v_align_tokens_embeddings = self._get_token_embeddings(align_token_ids)
+                        if v_align_tokens_embeddings.numel() > 0 and v_align_tokens_embeddings.shape[0] > 0:
+                            # Ensure v_align_tokens_embeddings is 2D for mean calculation if it's a single token embedding
+                            current_v_align_embeddings = v_align_tokens_embeddings
+                            if current_v_align_embeddings.ndim == 1:
+                                current_v_align_embeddings = current_v_align_embeddings.unsqueeze(0)
 
+                            v_align = torch.mean(current_v_align_embeddings, dim=0)
+                            v_align = F.normalize(v_align, p=2, dim=0) # Normalize v_align
+
+                            align_similarities = self._cosine_similarity(v_align, self.embedding_matrix) # Sim(v_c, v_align)
+                            alignment_bias = self.w_align * align_similarities
+                            scores_tensor[i] += alignment_bias
+                            # print(f"[BOIDS_DEBUG] Alignment: Applied. Avg bias: {alignment_bias.mean().item():.4f}")
+                        else:
+                            # print(f"[BOIDS_DEBUG] Alignment: Skipped (no valid embeddings for align_token_ids).")
+                            pass # Silently skip if no valid embeddings
+                    except Exception as e:
+                        print(f"[BOIDS_DEBUG] Alignment: Skipped due to error: {type(e).__name__} - {e}")
+                # else:
+                    # print(f"[BOIDS_DEBUG] Alignment: Skipped (no align_token_ids).")
+            # else:
+                # print(f"[BOIDS_DEBUG] Alignment: Skipped (w_align is 0 or n_align_tokens is 0 or no input tokens).")
 
             # --- Separation ---
             if self.w_sep != 0 and self.m_sep_tokens > 0 and len(current_sequence_input_ids) > 0:
-                if self.embedding_matrix is None:
-                    if not self.is_gguf_mode:
-                        print(f"[BOIDS_DEBUG] Separation: Skipped (embedding_matrix not available).")
-                    else:
-                        print(f"[BOIDS_DEBUG] Separation: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
-                else: # Proceed if embedding_matrix exists
-                    sep_token_ids = current_sequence_input_ids[-self.m_sep_tokens:]
-                    if sep_token_ids.numel() > 0:
-                        try:
-                            history_embeddings = self._get_token_embeddings(sep_token_ids)
-                            if history_embeddings.numel() > 0 and history_embeddings.shape[0] > 0:
-                                if history_embeddings.ndim == 1: history_embeddings = history_embeddings.unsqueeze(0) # Ensure 2D
-                                if history_embeddings.ndim == 2: # Should always be true now
-                                    norm_embedding_matrix = F.normalize(self.embedding_matrix, p=2, dim=1)
-                                    norm_history_embeddings = F.normalize(history_embeddings, p=2, dim=1)
-                                    all_sims_to_history = torch.matmul(norm_embedding_matrix, norm_history_embeddings.transpose(0, 1))
-                                    max_similarity_to_history, _ = torch.max(all_sims_to_history, dim=1)
-                                    mask = max_similarity_to_history > self.theta_sep
-                                    num_penalized = mask.sum().item()
-                                    if num_penalized > 0:
-                                        denominator = (1.0 - self.theta_sep)
-                                        if abs(denominator) < 1e-6 : # Avoid division by zero
-                                            denominator = 1e-6 * torch.sign(torch.tensor(denominator, device=current_processing_device)) if denominator != 0 else 1e-6
-                                        penalty_values = self.w_sep * ((max_similarity_to_history[mask] - self.theta_sep) / denominator)
-                                        penalty_values = torch.clamp(penalty_values, min=0) # Ensure penalty is not negative
-                                        scores_tensor[i, mask] -= penalty_values
-                                        print(f"[BOIDS_DEBUG] Separation: Penalized {num_penalized} tokens. Avg penalty: {penalty_values.mean().item() if num_penalized > 0 else 0:.4f}, Max penalty: {penalty_values.max().item() if num_penalized > 0 else 0:.4f}")
-                                    else:
-                                        print(f"[BOIDS_DEBUG] Separation: No tokens exceeded theta_sep ({self.theta_sep:.2f}). Max similarity found: {max_similarity_to_history.max().item() if max_similarity_to_history.numel() > 0 else 'N/A':.4f}.")
-                                else:
-                                    print(f"[BOIDS_DEBUG] Separation: Skipped (history_embeddings not 2D after processing).")
-                            else:
-                                print(f"[BOIDS_DEBUG] Separation: Skipped (no valid embeddings for sep_token_ids).")
-                        except Exception as e:
-                            print(f"[BOIDS_DEBUG] Separation: Skipped due to error: {e}") # General error catch
-                    else:
-                        print(f"[BOIDS_DEBUG] Separation: Skipped (no sep_token_ids).")
-            else:
-                print(f"[BOIDS_DEBUG] Separation: Skipped (w_sep is 0 or m_sep_tokens is 0 or no input tokens).")
+                # self.embedding_matrix is already checked to be not None
+                sep_token_ids = current_sequence_input_ids[-self.m_sep_tokens:]
+                if sep_token_ids.numel() > 0:
+                    try:
+                        history_embeddings = self._get_token_embeddings(sep_token_ids)
+                        if history_embeddings.numel() > 0 and history_embeddings.shape[0] > 0:
+                            current_history_embeddings = history_embeddings
+                            if current_history_embeddings.ndim == 1: # Ensure 2D for transpose
+                                current_history_embeddings = current_history_embeddings.unsqueeze(0)
 
+                            # Normalize both sets of embeddings for cosine similarity via matmul
+                            norm_embedding_matrix = F.normalize(self.embedding_matrix, p=2, dim=1)
+                            norm_history_embeddings = F.normalize(current_history_embeddings, p=2, dim=1)
+
+                            all_sims_to_history = torch.matmul(norm_embedding_matrix, norm_history_embeddings.transpose(0, 1))
+                            max_similarity_to_history, _ = torch.max(all_sims_to_history, dim=1)
+
+                            mask = max_similarity_to_history > self.theta_sep
+                            num_penalized = mask.sum().item()
+                            if num_penalized > 0:
+                                # P_sep(c) = w_sep * (Sim_max(c, H) - theta_sep) / (1 - theta_sep)
+                                denominator = (1.0 - self.theta_sep + 1e-8) # Add epsilon for stability
+                                penalty_values = self.w_sep * ((max_similarity_to_history[mask] - self.theta_sep) / denominator)
+                                penalty_values = torch.clamp(penalty_values, min=0) # Ensure penalty is not negative
+                                scores_tensor[i, mask] -= penalty_values
+                                # print(f"[BOIDS_DEBUG] Separation: Penalized {num_penalized} tokens. Avg penalty: {penalty_values.mean().item():.4f}")
+                            # else:
+                                # print(f"[BOIDS_DEBUG] Separation: No tokens exceeded theta_sep.")
+                        else:
+                            # print(f"[BOIDS_DEBUG] Separation: Skipped (no valid embeddings for sep_token_ids).")
+                            pass
+                    except Exception as e:
+                        print(f"[BOIDS_DEBUG] Separation: Skipped due to error: {type(e).__name__} - {e}")
+                # else:
+                    # print(f"[BOIDS_DEBUG] Separation: Skipped (no sep_token_ids).")
+            # else:
+                # print(f"[BOIDS_DEBUG] Separation: Skipped (w_sep is 0 or m_sep_tokens is 0 or no input tokens).")
 
             # --- Cohesion ---
             if self.w_cohesion != 0 and self.v_cohesion is not None and self.v_cohesion.numel() > 0:
-                if self.embedding_matrix is None:
-                    if not self.is_gguf_mode:
-                        print(f"[BOIDS_DEBUG] Cohesion: Skipped (embedding_matrix not available).")
-                    else:
-                        print(f"[BOIDS_DEBUG] Cohesion: Skipped (embedding_matrix not available for GGUF mode without external matrix).")
-                else: # Proceed if embedding_matrix exists
-                    v_cohesion_on_device = self.v_cohesion.to(current_processing_device)
-                    cohesion_similarities = self._cosine_similarity(v_cohesion_on_device, self.embedding_matrix)
+                # self.embedding_matrix is already checked
+                try:
+                    v_cohesion_on_device = self.v_cohesion.to(current_processing_device) # Ensure v_cohesion is on the correct device
+                    cohesion_similarities = self._cosine_similarity(v_cohesion_on_device, self.embedding_matrix) # Sim(v_c, v_cohesion)
                     cohesion_bias = self.w_cohesion * cohesion_similarities
                     scores_tensor[i] += cohesion_bias
-                    print(f"[BOIDS_DEBUG] Cohesion: Applied. Avg bias: {cohesion_bias.mean().item():.4f}, Max bias: {cohesion_bias.max().item():.4f}, Min bias: {cohesion_bias.min().item():.4f}")
-            else:
-                print(f"[BOIDS_DEBUG] Cohesion: Skipped (w_cohesion is 0 or v_cohesion not available).")
+                    # print(f"[BOIDS_DEBUG] Cohesion: Applied. Avg bias: {cohesion_bias.mean().item():.4f}")
+                except Exception as e:
+                    print(f"[BOIDS_DEBUG] Cohesion: Skipped due to error: {type(e).__name__} - {e}")
+            # else:
+                # print(f"[BOIDS_DEBUG] Cohesion: Skipped (w_cohesion is 0 or v_cohesion not available).")
 
-        if original_type_is_numpy:
-            return scores_tensor.cpu().numpy()
-        else:
-            return scores_tensor
+        # For HF models, the pipeline expects PyTorch tensors
+        return scores_tensor

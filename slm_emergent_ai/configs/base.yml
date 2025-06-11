@@ -7,12 +7,12 @@ model:
   quantize: "q4"     # Quantization may not apply for HF, or is handled differently
   n_ctx: 1024        # Context length
   boids_logits_params: # BoidsLogitsProcessor parameters moved under model
-    enabled: true    # Enable Boids for GGUF (experimental)
-    w_align: 0.05
-    w_sep: 0.3
-    w_cohesion: 0.1
-    n_align_tokens: 5           # Reduced from 15
-    m_sep_tokens: 5           # Reduced from 15
+    enabled: true    # Boids processing pipeline is still enabled
+    w_align: 0.05    # Restored non-zero weight
+    w_sep: 0.3       # Restored non-zero weight
+    w_cohesion: 0.1  # Restored non-zero weight
+    n_align_tokens: 5
+    m_sep_tokens: 5
     theta_sep: 0.80
     cohesion_prompt_text: "Focus on collaborative problem solving, shared understanding, and innovative ideas."
 
