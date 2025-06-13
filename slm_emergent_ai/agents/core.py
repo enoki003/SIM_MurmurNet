@@ -27,6 +27,14 @@ from ..llm_extensions.boids_logits_processor import BoidsLogitsProcessor
 from ..llm_extensions.gguf_boids_logits_processor_wrapper import GGUFBoidsLogitsProcessorWrapper
 from llama_cpp import LogitsProcessorList # For GGUF Logits Processing
 
+try:
+    from ..discussion_boids.manager import DiscussionBoidsManager
+    from ..summarizer.conversation_summarizer import ConversationSummarizer
+except ImportError:
+    # Fallback for potential execution context issues if run directly
+    from slm_emergent_ai.discussion_boids.manager import DiscussionBoidsManager
+    from slm_emergent_ai.summarizer.conversation_summarizer import ConversationSummarizer
+
 # Global semaphore to control simultaneous access to the model, preventing resource contention.
 _model_semaphore = asyncio.Semaphore(1)
 
@@ -45,16 +53,7 @@ class LLM:
         model_path: str,
         threads: int = 4,
         quantize: str = "q4",
-        n_ctx: int = 512,
-        # BoidsLogitsProcessor related parameters
-        boids_enabled: bool = True,
-        w_align: float = 0.1,
-        w_sep: float = 0.1,
-        w_cohesion: float = 0.1,
-        n_align_tokens: int = 10,
-        m_sep_tokens: int = 10,
-        theta_sep: float = 0.8,
-        cohesion_prompt_text: Optional[str] = None
+        n_ctx: int = 512
     ):
         """
         Initializes the LLM wrapper.
@@ -64,14 +63,6 @@ class LLM:
             threads (int): Number of threads for GGUF model processing.
             quantize (str): Quantization level for the model (e.g., "q4").
             n_ctx (int): Context length for the model.
-            boids_enabled (bool): Whether to enable BoidsLogitsProcessor.
-            w_align (float): Weight for the alignment rule in Boids.
-            w_sep (float): Weight for the separation rule in Boids.
-            w_cohesion (float): Weight for the cohesion rule in Boids.
-            n_align_tokens (int): Number of recent tokens to consider for alignment vector.
-            m_sep_tokens (int): Number of recent tokens to consider for separation check.
-            theta_sep (float): Similarity threshold for the separation rule.
-            cohesion_prompt_text (Optional[str]): Text used to generate the initial cohesion vector.
         """
         self.model_path = model_path
         self.threads = threads
@@ -80,20 +71,10 @@ class LLM:
         self.model: Optional[Any] = None
         self.tokenizer: Optional[Any] = None
 
-        self.boids_enabled = boids_enabled
-        self.w_align = w_align
-        self.w_sep = w_sep
-        self.w_cohesion = w_cohesion
-        self.n_align_tokens = n_align_tokens
-        self.m_sep_tokens = m_sep_tokens
-        self.theta_sep = theta_sep
-        self.cohesion_prompt_text = cohesion_prompt_text
-        self.boids_processor: Optional[BoidsLogitsProcessor] = None
-
         self._initialize()
 
     def _initialize(self):
-        """Initializes the model (GGUF or Hugging Face) and BoidsLogitsProcessor if enabled."""
+        """Initializes the model (GGUF or Hugging Face)."""
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         try:
             if self.model_path.endswith(".gguf"):
@@ -126,34 +107,6 @@ class LLM:
             self.tokenizer = None # Stays None for GGUF in terms of HF tokenizer
             print(f"GGUF model loaded successfully (threads: {self.threads}, context: {self.n_ctx})")
 
-            if self.boids_enabled:
-                try:
-                    print("[INFO] Attempting to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model...")
-                    self.boids_processor = GGUFBoidsLogitsProcessorWrapper(
-                        gguf_model=self.model,
-                        hf_tokenizer_for_cohesion=None, # Passing None for now, self.tokenizer is None for GGUF
-                        w_align=self.w_align,
-                        w_sep=self.w_sep,
-                        w_cohesion=self.w_cohesion,
-                        n_align_tokens=self.n_align_tokens,
-                        m_sep_tokens=self.m_sep_tokens,
-                        theta_sep=self.theta_sep,
-                        cohesion_prompt_text=self.cohesion_prompt_text,
-                        device='cpu'
-                    )
-                    if self.boids_processor and hasattr(self.boids_processor, 'boids_processor_internal') and self.boids_processor.boids_processor_internal is not None:
-                        print("[INFO] GGUFBoidsLogitsProcessorWrapper initialized successfully for GGUF model.")
-                    else:
-                        # This condition implies GGUFBoidsLogitsProcessorWrapper was created, but its internal BoidsLogitsProcessor might have failed.
-                        print("[WARNING] GGUFBoidsLogitsProcessorWrapper created, but its internal BoidsLogitsProcessor may not have initialized correctly. Boids rules might be skipped if internal processor is None.")
-                        if not self.boids_processor: # If wrapper itself failed to init
-                             self.boids_processor = None # Ensure it's None
-                except Exception as e:
-                    print(f"[WARNING] Failed to initialize GGUFBoidsLogitsProcessorWrapper for GGUF model: {e}. Boids processing will be skipped.")
-                    self.boids_processor = None
-            else:
-                self.boids_processor = None # Ensure it's None if not enabled
-
         except ImportError:
             raise ImportError("llama-cpp-python is required for GGUF models. Install with: pip install llama-cpp-python")
         except Exception as e:
@@ -171,20 +124,6 @@ class LLM:
             model_device = str(self.model.device if hasattr(self.model, 'device') else 'cpu')
             print(f"HF model loaded successfully on device: {model_device}")
 
-            if self.boids_enabled:
-                if self.model and self.tokenizer and hasattr(self.model, 'get_input_embeddings'): # Check for get_input_embeddings
-                    self.boids_processor = BoidsLogitsProcessor(
-                        model=self.model,
-                        tokenizer=self.tokenizer,
-                        w_align=self.w_align, w_sep=self.w_sep, w_cohesion=self.w_cohesion,
-                        n_align_tokens=self.n_align_tokens, m_sep_tokens=self.m_sep_tokens,
-                        theta_sep=self.theta_sep, cohesion_prompt_text=self.cohesion_prompt_text,
-                        device=model_device
-                    )
-                    print(f"[INFO] BoidsLogitsProcessor initialized for HF model on device {model_device}.")
-                else:
-                    print("[WARNING] HF Model (actual instance), Tokenizer, or get_input_embeddings method not available. BoidsLogitsProcessor cannot be initialized.")
-                    self.boids_processor = None
         except ImportError:
             raise ImportError("transformers is required for Hugging Face models. Install with: pip install transformers torch")
         except Exception as e:
@@ -224,10 +163,6 @@ class LLM:
         Raises:
             RuntimeError: If generation fails for any model type.
         """
-        internal_logits_processors = []
-        if self.boids_enabled and self.boids_processor:
-            internal_logits_processors.append(self.boids_processor)
-
         if self.model is None:
             return "[ERROR] ModelNotInitialized: Model is not initialized."
 
@@ -237,13 +172,7 @@ class LLM:
             try:
                 # LogitsProcessorList is imported at the top
 
-                active_logits_processors = []
-                # internal_logits_processors was previously defined, but GGUF needs specific handling
-                if self.boids_enabled and self.boids_processor:
-                    print("[DEBUG] LLM.generate: Adding GGUF Boids processor to list for GGUF model.")
-                    active_logits_processors.append(self.boids_processor) # self.boids_processor is the GGUF wrapper
-
-                final_logits_processor_arg = LogitsProcessorList(active_logits_processors) if active_logits_processors else None
+                final_logits_processor_arg = None
 
                 stop_sequences = stop or []
                 if self._is_gemma_model(): # This check might need refinement for GGUF Gemma
@@ -272,7 +201,7 @@ class LLM:
                 outputs = self.model.generate(
                     **inputs, max_new_tokens=max_tokens, do_sample=True,
                     temperature=temperature, top_p=top_p, repetition_penalty=repeat_penalty,
-                    logits_processor=internal_logits_processors if internal_logits_processors else None,
+                    logits_processor=None,
                     pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id
                 )
                 input_length = inputs.input_ids.shape[1]
@@ -299,6 +228,8 @@ class SLMAgent:
         role: str,
         model: LLM,
         tokenizer: Any, # Tokenizer from the LLM wrapper, used by SLMAgent for prompt construction.
+        discussion_boids_manager: DiscussionBoidsManager, # Keep this, even if Optional for now
+        summarizer: Optional[ConversationSummarizer],
         name: Optional[str] = None,
     ):
         """
@@ -307,8 +238,10 @@ class SLMAgent:
         Args:
             id (int): Unique identifier for the agent.
             role (str): The role of the agent (typically "Agent").
-            model (LLM): The LLM instance (which includes Boids config) used for text generation.
-            tokenizer (Any): The tokenizer associated with the LLM (can be None for GGUF).
+            model (LLM): The LLM instance used for text generation.
+            tokenizer (Any): The tokenizer associated with the LLM.
+            discussion_boids_manager (DiscussionBoidsManager): Manager for Boids discussion rules.
+            summarizer (Optional[ConversationSummarizer]): Summarizer for conversation history.
             name (Optional[str]): Optional name for the agent. Defaults to "Agent_{id}".
         """
         self.id = id
@@ -316,6 +249,8 @@ class SLMAgent:
         self.name = name if name else f"Agent_{id}"
         self.model_wrapper = model
         self.tokenizer = tokenizer
+        self.discussion_boids_manager = discussion_boids_manager
+        self.summarizer = summarizer
         self.cache: Dict[str, Any] = {}
         self.shutdown_flag = False  # シャットダウンフラグを追加
         print(f"[DEBUG] Agent {id} ({self.name}/{self.role}) initialized.")
@@ -336,24 +271,44 @@ class SLMAgent:
 
         prompt_parts = [instruction]
 
-        if conversation_history:
+        if conversation_history: # conversation_history is now processed_history_for_prompt
             formatted_history = []
-            # Limit to only the last 2 messages to keep prompt short
-            for msg in conversation_history[-2:]:
+            for msg in conversation_history: # Iterate through what's passed (summary + recent verbatim)
                 if isinstance(msg, dict):
                     sender_name = msg.get("agent_name", "Agent")
                     text_content = msg.get("text", "")
-                    # Truncate long messages
-                    if len(text_content) > 100:
-                        text_content = text_content[:100] + "..."
-                    formatted_history.append(f"{sender_name}: {text_content}")
-                else:
-                    formatted_history.append(str(msg)[:100])
+
+                    if msg.get("type") == "summary":
+                        # Summary text is already formatted by the summarizer, including its own internal newlines.
+                        formatted_history.append(text_content)
+                    else:
+                        # Truncate long individual verbatim messages
+                        if len(text_content) > 150: # Increased truncation limit for verbatim messages
+                            text_content = text_content[:150] + "..."
+                        formatted_history.append(f"{sender_name}: {text_content}")
+                else: # Should ideally not happen if processed_history_for_prompt is well-formed
+                    formatted_history.append(str(msg)[:150])
+
             if formatted_history:
-                prompt_parts.append("Recent:\n" + "\n".join(formatted_history))
+                # Use a more generic header as it might contain summary + recent, or just recent.
+                prompt_parts.append("Conversation Context:\n" + "\n".join(formatted_history))
+
+        boids_directive_text = ""
+        # Boids manager still uses the potentially summarized history.
+        # This is acceptable as Boids manager analyzes text content, and summary is text.
+        # The 'System' agent for summary will be correctly filtered by Boids manager if needed.
+        if self.discussion_boids_manager and conversation_history:
+            boids_directive_text = self.discussion_boids_manager.get_directive_for_agent(
+                agent_id_to_prompt=self.name,
+                recent_messages_history=conversation_history # Pass the processed history
+            )
 
         # Truncate the task prompt if it's too long
         task_prompt = base_task_prompt[:200] + "..." if len(base_task_prompt) > 200 else base_task_prompt
+
+        if boids_directive_text:
+            prompt_parts.append(f"Boids Suggestion: {boids_directive_text}")
+
         prompt_parts.append(f"Task: {task_prompt}")
         prompt_parts.append("Your response:")
 
@@ -379,10 +334,37 @@ class SLMAgent:
                 if self.shutdown_flag:
                     print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) received shutdown signal, stopping conversation.")
                     break
+
+                # --- History Processing with Summarization ---
+                history_fetch_limit: int = 20  # How many messages to pull for potential summarization
+                num_recent_verbatim: int = 3 # How many of the very latest messages to keep raw for detailed context
+                                             # Also used by Boids manager if no summary.
+
+                raw_messages_for_history = await bb.pull_messages_raw(k=history_fetch_limit)
+
+                processed_history_for_prompt: List[Dict[str, Any]] = []
+                summary_text = ""
+
+                if self.summarizer and len(raw_messages_for_history) > self.summarizer.summarize_threshold:
+                    # Ensure num_recent_verbatim doesn't exceed available messages if list is short but > threshold
+                    actual_num_recent_verbatim = min(num_recent_verbatim, len(raw_messages_for_history))
+
+                    messages_to_summarize = raw_messages_for_history[:-actual_num_recent_verbatim] if actual_num_recent_verbatim > 0 else raw_messages_for_history
+                    recent_verbatim_messages = raw_messages_for_history[-actual_num_recent_verbatim:] if actual_num_recent_verbatim > 0 else []
+
+                    if messages_to_summarize: # Only summarize if there are messages designated for summarization
+                        summary_text = self.summarizer.summarize(messages_to_summarize)
                     
-                # Limit conversation history to reduce context usage
-                conversation_history = await bb.pull_messages_raw(k=3)
-                prompt_for_llm = self._build_role_specific_prompt(current_task_prompt, conversation_history)
+                    if summary_text:
+                        processed_history_for_prompt.append({"agent_name": "System", "text": summary_text, "type": "summary"})
+                    processed_history_for_prompt.extend(recent_verbatim_messages)
+
+                else: # No summarizer, or not enough messages for the summarizer's threshold
+                      # Fallback to a limited number of recent raw messages.
+                    actual_num_recent_verbatim = min(num_recent_verbatim, len(raw_messages_for_history))
+                    processed_history_for_prompt = raw_messages_for_history[-actual_num_recent_verbatim:]
+
+                prompt_for_llm = self._build_role_specific_prompt(current_task_prompt, processed_history_for_prompt)
                 response = await self._generate_response(prompt_for_llm)
                 
                 if response and response.strip():

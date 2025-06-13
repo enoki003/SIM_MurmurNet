@@ -167,28 +167,6 @@ class Dashboard:
                                 </div>
                             </div>
                         </div>
-                        
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">λ Parameters</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-4 mb-3">
-                                        <div class="text-muted">λ_a（整列）</div>
-                                        <div class="metrics-value">{{ metrics.lambda && metrics.lambda.a ? metrics.lambda.a.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                    <div class="col-4 mb-3">
-                                        <div class="text-muted">λ_c（結合）</div>
-                                        <div class="metrics-value">{{ metrics.lambda && metrics.lambda.c ? metrics.lambda.c.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                    <div class="col-4 mb-3">
-                                        <div class="text-muted">λ_s（分離）</div>
-                                        <div class="metrics-value">{{ metrics.lambda && metrics.lambda.s ? metrics.lambda.s.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </div>
                 
@@ -261,15 +239,8 @@ class Dashboard:
                             entropy: 4.5,
                             vdi: 0.7,
                             fcr: 0.9,
-                            speed: 15.0,
-                            lambda: {
-                                a: 0.3,
-                                c: 0.3,
-                                s: 0.1
-                            }
+                            speed: 15.0
                         });
-                        
-                        // lambda変数は不要になりました（metricsに含まれる）
                         
                         const blackboardMessages = ref([]);
                         const promptInput = ref('');
@@ -442,16 +413,6 @@ class Dashboard:
                                     const metricsData = await metricsResponse.json();
                                     metrics.value = { ...metrics.value, ...metricsData };
                                     
-                                    // λパラメータはメトリクスオブジェクト内の'lambda'プロパティから取得
-                                    // 何も返されない場合のフォールバック値を設定
-                                    if (!metrics.value.lambda) {
-                                        metrics.value.lambda = {
-                                            a: 0.3,
-                                            c: 0.3,
-                                            s: 0.1
-                                        };
-                                    }
-                                    
                                     // システムリソース使用状況
                                     const cpuUsage = Math.floor(Math.random() * 30) + 20; // 20-50%範囲で変動
                                     const ramUsage = Math.floor(Math.random() * 20) + 40; // 40-60%範囲で変動
@@ -543,10 +504,6 @@ class Dashboard:
                 # For now, continue with individual param fetching as per existing logic
                 # but this is where it could be simplified if MetricsTracker posts its full dict to bb.
                 try:
-                    lambda_a = await self.bb.get_param("λ_a", 0.3) # λ params are obsolete for Boids
-                    lambda_c = await self.bb.get_param("λ_c", 0.3) # but UI still displays them.
-                    lambda_s = await self.bb.get_param("λ_s", 0.1)
-                    
                     entropy = await self.bb.get_param("entropy", 0.0) # Default to 0 if not set
                     target_H = await self.bb.get_param("target_H", 5.0) # Example value
                     
@@ -555,9 +512,6 @@ class Dashboard:
                         "vdi": float(await self.bb.get_param("vdi", 0.0)),
                         "fcr": float(await self.bb.get_param("fcr", 1.0)), # Default FCR is 1.0
                         "speed": float(await self.bb.get_param("speed", 0.0)),
-                        "lambda": { # UI expects this structure for lambda
-                            "a": float(lambda_a), "c": float(lambda_c), "s": float(lambda_s)
-                        },
                         "target_H": float(target_H) # Example, if used by controller
                     }
                     print(f"[METRICS_DEBUG] Dashboard._fetch_metrics returning from bb.get_param: {metrics_to_return}")
@@ -574,12 +528,7 @@ class Dashboard:
                     "entropy": 4.5,
                     "vdi": 0.7,
                     "fcr": 0.9,
-                    "speed": 15.0,
-                    "lambda": dict[str, float]({
-                        "a": 0.3,
-                        "c": 0.3,
-                        "s": 0.1
-                    })
+                    "speed": 15.0
                 }
                 
                 # メッセージからメトリクス情報を抽出
@@ -592,10 +541,6 @@ class Dashboard:
                                 for key, value in msg['metrics'].items():
                                     if key in latest_metrics and isinstance(value, (int, float)):
                                         latest_metrics[key] = float(value)
-                                    elif key == 'lambda' and isinstance(value, dict):
-                                        for lkey, lvalue in value.items():
-                                            if lkey in latest_metrics['lambda'] and isinstance(lvalue, (int, float)):
-                                                latest_metrics['lambda'][lkey] = float(lvalue)
                         
                         # 個別のメトリクス値が含まれている場合
                         for key in ['entropy', 'vdi', 'fcr', 'speed']:
@@ -623,20 +568,17 @@ class Dashboard:
                 # If metrics_to_return is still empty, use a default structure.
                 if not metrics_to_return:
                     metrics_to_return = {
-                        "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
-                        "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0
+                        "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0, "target_H": 0.0
                     }
                 print(f"[METRICS_DEBUG] Dashboard._fetch_metrics (after potential fallback): {metrics_to_return}")
                 return metrics_to_return
             else:
                 print("[METRICS_DEBUG] Dashboard._fetch_metrics: BlackBoard not available.")
                 # Return a default structure if BlackBoard is not available
-                return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
-                         "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0 }
+                return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0, "target_H": 0.0 }
         except Exception as e:
             print(f"[METRICS_DEBUG] Error in _fetch_metrics: {e}")
-            return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0,
-                     "lambda": {"a": 0.0, "c": 0.0, "s": 0.0}, "target_H": 0.0 }
+            return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0, "target_H": 0.0 }
 
     async def _fetch_blackboard(self) -> Dict[str, Any]:
         """BlackBoardの情報を取得"""
