@@ -51,6 +51,10 @@ except ImportError:
     from .eval.metrics import MetricsTracker, calculate_vdi, calculate_fcr
     from .ui.dashboard import init_app
     from .agents.rag import RAGAgent
+    try:
+        from slm_emergent_ai.discussion_boids.manager import DiscussionBoidsManager
+    except ImportError:
+        from .discussion_boids.manager import DiscussionBoidsManager
 
 
 # グローバル変数でシャットダウン状態を管理
@@ -157,6 +161,18 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
         print("Please check your model configuration and try again.")
         return
 
+    # --- DiscussionBoidsManager Initialization ---
+    print("Initializing DiscussionBoidsManager...")
+    try:
+        discussion_boids_manager = DiscussionBoidsManager() # Uses default model
+        if not discussion_boids_manager.embedding_model:
+            print("[WARNING] DiscussionBoidsManager failed to load its embedding model. Boids directives might be affected.")
+        else:
+            print("DiscussionBoidsManager initialized successfully.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize DiscussionBoidsManager: {e}")
+        discussion_boids_manager = None # Ensure it's None if init fails
+
     # --- Agent Initialization ---
     agent_count: int = config.get("agent", {}).get("n", 3)
     agents: List[SLMAgent] = []
@@ -176,6 +192,7 @@ async def run_simulation(config: Dict[str, Any]) -> None:  # noqa: C901 (allow l
             model=model,
             tokenizer=model.tokenizer,
             name=name,
+            discussion_boids_manager=discussion_boids_manager
         )
         agents.append(agent)
         print(f"[DEBUG] Agent {i + 1} ({name}) initialized with role: {role}.")
