@@ -58,7 +58,6 @@ class SQLiteBackend:
             CREATE TABLE IF NOT EXISTS topic_summary (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 summary TEXT,
-                vector BLOB,
                 timestamp REAL
             )
             """)
@@ -242,14 +241,13 @@ class SQLiteBackend:
             print(f"Error getting parameter from SQLite: {e}")
             return default
     
-    def save_summary(self, summary: str, vector: np.ndarray) -> bool:
+    def save_summary(self, summary: str) -> bool:
         """
         トピックサマリーを保存
         
         Parameters:
         -----------
         summary: サマリーテキスト
-        vector: 埋め込みベクトル
         
         Returns:
         --------
@@ -259,8 +257,8 @@ class SQLiteBackend:
             timestamp = time.time()
             cursor = self.conn.cursor()
             cursor.execute(
-                "INSERT INTO topic_summary (summary, vector, timestamp) VALUES (?, ?, ?)",
-                (summary, vector.tobytes(), timestamp)
+                "INSERT INTO topic_summary (summary, timestamp) VALUES (?, ?)",
+                (summary, timestamp)
             )
             self.conn.commit()
             return True
@@ -268,38 +266,26 @@ class SQLiteBackend:
             print(f"Error saving summary to SQLite: {e}")
             return False
     
-    def get_latest_summary(self) -> Dict[str, Any]:
+    def get_latest_summary(self) -> Optional[str]:
         """
         最新のトピックサマリーを取得
         
         Returns:
         --------
-        サマリー情報
+        サマリーテキスト or None
         """
         try:
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT summary, vector, timestamp FROM topic_summary ORDER BY timestamp DESC LIMIT 1"
+                "SELECT summary FROM topic_summary ORDER BY timestamp DESC LIMIT 1"
             )
             row = cursor.fetchone()
             if row:
-                return {
-                    "summary": row[0],
-                    "vector": np.frombuffer(row[1]),
-                    "timestamp": row[2]
-                }
-            return {
-                "summary": "",
-                "vector": np.zeros(384),
-                "timestamp": 0.0
-            }
+                return row[0]
+            return None
         except Exception as e:
             print(f"Error getting summary from SQLite: {e}")
-            return {
-                "summary": "",
-                "vector": np.zeros(384),
-                "timestamp": 0.0
-            }
+            return None
     
     def clear_all(self) -> bool:
         """

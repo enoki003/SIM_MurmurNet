@@ -133,14 +133,13 @@ class RedisBackend:
             print(f"Error getting parameter from Redis: {e}")
             return default
     
-    def save_summary(self, summary: str, vector: np.ndarray) -> bool:
+    def save_summary(self, summary: str) -> bool:
         """
         トピックサマリーを保存
         
         Parameters:
         -----------
         summary: サマリーテキスト
-        vector: 埋め込みベクトル
         
         Returns:
         --------
@@ -150,7 +149,6 @@ class RedisBackend:
             timestamp = time.time()
             summary_data = {
                 "summary": summary,
-                "vector": vector.tolist(),
                 "timestamp": timestamp
             }
             self.client.set("topic_summary", json.dumps(summary_data))
@@ -159,35 +157,23 @@ class RedisBackend:
             print(f"Error saving summary to Redis: {e}")
             return False
     
-    def get_latest_summary(self) -> Dict[str, Any]:
+    def get_latest_summary(self) -> Optional[str]:
         """
         最新のトピックサマリーを取得
         
         Returns:
         --------
-        サマリー情報
+        サマリーテキスト or None
         """
         try:
             summary_data = self.client.get("topic_summary")
             if summary_data:
                 data = json.loads(summary_data.decode())
-                return {
-                    "summary": data["summary"],
-                    "vector": np.array(data["vector"]),
-                    "timestamp": data["timestamp"]
-                }
-            return {
-                "summary": "",
-                "vector": np.zeros(384),
-                "timestamp": 0.0
-            }
+                return data.get("summary")
+            return None
         except Exception as e:
             print(f"Error getting summary from Redis: {e}")
-            return {
-                "summary": "",
-                "vector": np.zeros(384),
-                "timestamp": 0.0
-            }
+            return None
     
     def clear_all(self) -> bool:
         """

@@ -23,17 +23,17 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel # For type hinting LogitsProcessor model
 
 from transformers import LogitsProcessor # Actual import
-from ..llm_extensions.boids_logits_processor import BoidsLogitsProcessor
-from ..llm_extensions.gguf_boids_logits_processor_wrapper import GGUFBoidsLogitsProcessorWrapper
 from llama_cpp import LogitsProcessorList # For GGUF Logits Processing
 
 try:
-    from ..discussion_boids.manager import DiscussionBoidsManager
-    from ..summarizer.conversation_summarizer import ConversationSummarizer
+    from ..discussion_boids.manager import DiscussionBoidsManager # This might be unused now
+    from ..summarizer.conversation_summarizer import ConversationSummarizer # Keep for type hinting if AgentHistoryManager needs it
+    from .history_manager import AgentHistoryManager
 except ImportError:
     # Fallback for potential execution context issues if run directly
     from slm_emergent_ai.discussion_boids.manager import DiscussionBoidsManager
     from slm_emergent_ai.summarizer.conversation_summarizer import ConversationSummarizer
+    AgentHistoryManager = None # Or raise error if critical
 
 # Global semaphore to control simultaneous access to the model, preventing resource contention.
 _model_semaphore = asyncio.Semaphore(1)
@@ -227,9 +227,7 @@ class SLMAgent:
         id: int,
         role: str,
         model: LLM,
-        tokenizer: Any, # Tokenizer from the LLM wrapper, used by SLMAgent for prompt construction.
-        discussion_boids_manager: DiscussionBoidsManager, # Keep this, even if Optional for now
-        summarizer: Optional[ConversationSummarizer],
+        history_manager: AgentHistoryManager,
         name: Optional[str] = None,
     ):
         """
@@ -239,18 +237,17 @@ class SLMAgent:
             id (int): Unique identifier for the agent.
             role (str): The role of the agent (typically "Agent").
             model (LLM): The LLM instance used for text generation.
-            tokenizer (Any): The tokenizer associated with the LLM.
-            discussion_boids_manager (DiscussionBoidsManager): Manager for Boids discussion rules.
-            summarizer (Optional[ConversationSummarizer]): Summarizer for conversation history.
+            history_manager (AgentHistoryManager): Manages conversation history processing.
             name (Optional[str]): Optional name for the agent. Defaults to "Agent_{id}".
         """
+        if AgentHistoryManager is None and history_manager is None: # Defensive check if fallback import was hit
+            raise ImportError("AgentHistoryManager could not be imported and is required by SLMAgent.")
+
         self.id = id
         self.role = role
         self.name = name if name else f"Agent_{id}"
         self.model_wrapper = model
-        self.tokenizer = tokenizer
-        self.discussion_boids_manager = discussion_boids_manager
-        self.summarizer = summarizer
+        self.history_manager = history_manager
         self.cache: Dict[str, Any] = {}
         self.shutdown_flag = False  # シャットダウンフラグを追加
         print(f"[DEBUG] Agent {id} ({self.name}/{self.role}) initialized.")
@@ -267,47 +264,24 @@ class SLMAgent:
         Returns:
             str: The fully constructed prompt for the LLM.
         """
-        instruction = "You are an AI agent in a discussion. Provide a thoughtful response."
+        instruction = f"You are an AI agent with the role of {self.role}. Provide a thoughtful response."
 
         prompt_parts = [instruction]
 
-        if conversation_history: # conversation_history is now processed_history_for_prompt
-            formatted_history = []
-            for msg in conversation_history: # Iterate through what's passed (summary + recent verbatim)
-                if isinstance(msg, dict):
-                    sender_name = msg.get("agent_name", "Agent")
-                    text_content = msg.get("text", "")
+        # conversation_history is actually processed_history_for_prompt from run_conversation
+        formatted_history_strings = self.history_manager.format_history_for_prompt(conversation_history)
 
-                    if msg.get("type") == "summary":
-                        # Summary text is already formatted by the summarizer, including its own internal newlines.
-                        formatted_history.append(text_content)
-                    else:
-                        # Truncate long individual verbatim messages
-                        if len(text_content) > 150: # Increased truncation limit for verbatim messages
-                            text_content = text_content[:150] + "..."
-                        formatted_history.append(f"{sender_name}: {text_content}")
-                else: # Should ideally not happen if processed_history_for_prompt is well-formed
-                    formatted_history.append(str(msg)[:150])
-
-            if formatted_history:
-                # Use a more generic header as it might contain summary + recent, or just recent.
-                prompt_parts.append("Conversation Context:\n" + "\n".join(formatted_history))
+        if formatted_history_strings:
+            # Use a more generic header as it might contain summary + recent, or just recent.
+            prompt_parts.append("Conversation Context:\n" + "\n".join(formatted_history_strings))
 
         boids_directive_text = ""
         # Boids manager still uses the potentially summarized history.
         # This is acceptable as Boids manager analyzes text content, and summary is text.
         # The 'System' agent for summary will be correctly filtered by Boids manager if needed.
-        if self.discussion_boids_manager and conversation_history:
-            boids_directive_text = self.discussion_boids_manager.get_directive_for_agent(
-                agent_id_to_prompt=self.name,
-                recent_messages_history=conversation_history # Pass the processed history
-            )
 
         # Truncate the task prompt if it's too long
         task_prompt = base_task_prompt[:200] + "..." if len(base_task_prompt) > 200 else base_task_prompt
-
-        if boids_directive_text:
-            prompt_parts.append(f"Boids Suggestion: {boids_directive_text}")
 
         prompt_parts.append(f"Task: {task_prompt}")
         prompt_parts.append("Your response:")
@@ -335,34 +309,12 @@ class SLMAgent:
                     print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) received shutdown signal, stopping conversation.")
                     break
 
-                # --- History Processing with Summarization ---
-                history_fetch_limit: int = 20  # How many messages to pull for potential summarization
-                num_recent_verbatim: int = 3 # How many of the very latest messages to keep raw for detailed context
-                                             # Also used by Boids manager if no summary.
-
-                raw_messages_for_history = await bb.pull_messages_raw(k=history_fetch_limit)
-
-                processed_history_for_prompt: List[Dict[str, Any]] = []
-                summary_text = ""
-
-                if self.summarizer and len(raw_messages_for_history) > self.summarizer.summarize_threshold:
-                    # Ensure num_recent_verbatim doesn't exceed available messages if list is short but > threshold
-                    actual_num_recent_verbatim = min(num_recent_verbatim, len(raw_messages_for_history))
-
-                    messages_to_summarize = raw_messages_for_history[:-actual_num_recent_verbatim] if actual_num_recent_verbatim > 0 else raw_messages_for_history
-                    recent_verbatim_messages = raw_messages_for_history[-actual_num_recent_verbatim:] if actual_num_recent_verbatim > 0 else []
-
-                    if messages_to_summarize: # Only summarize if there are messages designated for summarization
-                        summary_text = self.summarizer.summarize(messages_to_summarize)
-                    
-                    if summary_text:
-                        processed_history_for_prompt.append({"agent_name": "System", "text": summary_text, "type": "summary"})
-                    processed_history_for_prompt.extend(recent_verbatim_messages)
-
-                else: # No summarizer, or not enough messages for the summarizer's threshold
-                      # Fallback to a limited number of recent raw messages.
-                    actual_num_recent_verbatim = min(num_recent_verbatim, len(raw_messages_for_history))
-                    processed_history_for_prompt = raw_messages_for_history[-actual_num_recent_verbatim:]
+                # Use AgentHistoryManager to get processed history
+                # These limits could be made configurable (e.g., from agent config or run_sim)
+                processed_history_for_prompt = await self.history_manager.get_processed_history(
+                    history_fetch_limit=20,
+                    num_recent_verbatim=3
+                )
 
                 prompt_for_llm = self._build_role_specific_prompt(current_task_prompt, processed_history_for_prompt)
                 response = await self._generate_response(prompt_for_llm)

@@ -8,7 +8,7 @@ import asyncio
 # import json # Removed unused import
 # import time # Removed unused import
 from typing import Any, Dict, List, Optional, Union
-import numpy as np
+# import numpy as np # Removed as it's no longer used
 
 from .db_sqlite import SQLiteBackend
 from .db_redis import RedisBackend
@@ -35,7 +35,6 @@ class BlackBoard:
         self.mode = mode
         self.redis_url = redis_url
         self.backend: Any = backend # Type set to Any to accommodate different backend types
-        self.summary_vec: np.ndarray = np.zeros(384, dtype=np.float32)  # Default embedding dimension and type
 
         if backend is None:
             self._initialize()
@@ -147,14 +146,8 @@ class BlackBoard:
             
             concatenated_text = " ".join(messages_texts)
             
-            # Embedding generation removed, using zero vector.
-            vector_dim = self.summary_vec.shape[0] if self.summary_vec is not None else 384
-            current_dtype = self.summary_vec.dtype if self.summary_vec is not None else np.float32
-            vector = np.zeros(vector_dim, dtype=current_dtype)
-            
-            # Save the textual part of the summary (first 200 chars) and the zero vector.
-            self.backend.save_summary(concatenated_text[:200], vector)
-            self.summary_vec = vector # Update in-memory summary vector
+            # Save the textual part of the summary (first 200 chars).
+            self.backend.save_summary(concatenated_text[:200])
             
         except Exception as e:
             print(f"Error updating summary: {e}")
@@ -204,25 +197,21 @@ class BlackBoard:
             print(f"Error getting parameter '{key}': {e}")
             return default
     
-    async def update_summary(self, summary_text: str, vector: np.ndarray) -> bool: # Renamed summary to summary_text
+    async def update_summary(self, summary_text: str) -> bool:
         """
-        Directly updates the topic summary text and vector. (トピックサマリーを直接更新)
+        Directly updates the topic summary text. (トピックサマリーを直接更新)
         
         Parameters:
         -----------
         summary_text: str
             要約テキスト - The new summary text.
-        vector: np.ndarray
-            埋め込みベクトル - The new embedding vector.
         
         Returns:
         --------
         bool: 成功したかどうか - True if successful, False otherwise.
         """
         try:
-            result = self.backend.save_summary(summary_text, vector)
-            if result:
-                self.summary_vec = vector.copy() # Update in-memory vector if save was successful
+            result = self.backend.save_summary(summary_text)
             return result
         except Exception as e:
             print(f"Error updating summary directly: {e}")
@@ -238,15 +227,12 @@ class BlackBoard:
         """
         try:
             result = self.backend.clear_all()
-            if result:
-                # Reset in-memory summary vector as well
-                self.summary_vec = np.zeros_like(self.summary_vec)
             return result
         except Exception as e:
             print(f"Error clearing BlackBoard: {e}")
             return False
     
-    def get_topic_summary(self, max_words: int = 30) -> str:
+    async def get_topic_summary(self, max_words: int = 30) -> str:
         """
         Retrieves the current textual topic summary. (現在のトピックサマリーを取得)
         If no summary is stored, it generates a simple one from recent messages.
@@ -259,13 +245,14 @@ class BlackBoard:
         """
         summary_text_to_return = "" # Renamed to avoid conflict
         try:
-            summary_info = self.backend.get_latest_summary() # This should return {'summary': str, 'vector': np.ndarray}
+            # This now returns Optional[str]
+            latest_summary_text = self.backend.get_latest_summary()
             
-            if summary_info and "summary" in summary_info and summary_info["summary"]:
-                summary_text_to_return = summary_info["summary"]
+            if latest_summary_text:
+                summary_text_to_return = latest_summary_text
             else:
                 # Fallback: generate a simple summary from the last 10 messages (text only)
-                raw_messages_texts = asyncio.run(self.pull(k=10)) # pull returns List[str]
+                raw_messages_texts = await self.pull(k=10) # pull returns List[str]
                 if not raw_messages_texts:
                     return "" # No messages, no summary
                 summary_text_to_return = " ".join(raw_messages_texts)
