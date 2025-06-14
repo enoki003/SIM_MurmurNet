@@ -23,9 +23,10 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel # For type hinting LogitsProcessor model
 
 from transformers import LogitsProcessor # Actual import
-from ..llm_extensions.boids_logits_processor import BoidsLogitsProcessor
-from ..llm_extensions.gguf_boids_logits_processor_wrapper import GGUFBoidsLogitsProcessorWrapper
-from llama_cpp import LogitsProcessorList # For GGUF Logits Processing
+try:
+    from llama_cpp import LogitsProcessorList # For GGUF Logits Processing
+except ImportError:
+    LogitsProcessorList = None  # Fallback if llama_cpp not available
 
 try:
     from ..discussion_boids.manager import DiscussionBoidsManager
@@ -44,8 +45,6 @@ class LLM:
     Language Model Wrapper (LLM).
     Handles loading of different model types (GGUF via llama-cpp-python, or Hugging Face Transformers)
     and provides a unified interface for text generation.
-    It also integrates BoidsLogitsProcessor for modifying token generation probabilities
-    based on Boids-inspired rules, if enabled and configured.
     """
 
     def __init__(
@@ -53,7 +52,16 @@ class LLM:
         model_path: str,
         threads: int = 4,
         quantize: str = "q4",
-        n_ctx: int = 512
+        n_ctx: int = 512,
+        boids_enabled: bool = True,
+        w_align: float = 0.1,
+        w_sep: float = 0.1,
+        w_cohesion: float = 0.1,
+        n_align_tokens: int = 10,
+        m_sep_tokens: int = 10,
+        theta_sep: float = 0.8,
+        cohesion_prompt: str = "",
+        cohesion_prompt_text: str = ""
     ):
         """
         Initializes the LLM wrapper.
@@ -63,13 +71,30 @@ class LLM:
             threads (int): Number of threads for GGUF model processing.
             quantize (str): Quantization level for the model (e.g., "q4").
             n_ctx (int): Context length for the model.
+            boids_enabled (bool): Whether to enable boids behavior.
+            w_align (float): Weight for alignment behavior.
+            w_sep (float): Weight for separation behavior.            w_cohesion (float): Weight for cohesion behavior.
+            n_align_tokens (int): Number of tokens for alignment.
+            m_sep_tokens (int): Number of tokens for separation.
+            theta_sep (float): Threshold for separation.
+            cohesion_prompt (str): Prompt for cohesion behavior.
+            cohesion_prompt_text (str): Text prompt for cohesion behavior.
         """
         self.model_path = model_path
         self.threads = threads
         self.quantize = quantize
         self.n_ctx = n_ctx
-        self.model: Optional[Any] = None
-        self.tokenizer: Optional[Any] = None
+        self.boids_enabled = boids_enabled
+        self.w_align = w_align
+        self.w_sep = w_sep
+        self.w_cohesion = w_cohesion
+        self.n_align_tokens = n_align_tokens
+        self.m_sep_tokens = m_sep_tokens
+        self.theta_sep = theta_sep
+        self.cohesion_prompt = cohesion_prompt
+        self.cohesion_prompt_text = cohesion_prompt_text
+        self.model = None
+        self.tokenizer = None
 
         self._initialize()
 
@@ -93,8 +118,6 @@ class LLM:
         """Initializes a GGUF model using llama-cpp-python."""
         try:
             from llama_cpp import Llama
-            # GGUFBoidsLogitsProcessorWrapper is imported at the top
-            # LogitsProcessorList is imported at the top
 
             if not os.path.exists(self.model_path):
                 raise FileNotFoundError(f"GGUF model file not found: {self.model_path}")
@@ -116,12 +139,31 @@ class LLM:
         """Initializes a Hugging Face Transformers model."""
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
+            import torch
             print(f"Loading HF model: {self.model_path}")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path, low_cpu_mem_usage=True, device_map="auto"
-            )
-            model_device = str(self.model.device if hasattr(self.model, 'device') else 'cpu')
+            
+            # Check if CUDA is available, otherwise use CPU
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Using device: {device}")
+            
+            if device == "cpu":
+                # Load model on CPU with optimizations for memory efficiency
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_path, 
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.float32,
+                    device_map="cpu"
+                )
+            else:
+                # Load model on GPU
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_path, 
+                    low_cpu_mem_usage=True,
+                    device_map="auto"
+                )
+            
+            model_device = str(self.model.device if hasattr(self.model, 'device') else device)
             print(f"HF model loaded successfully on device: {model_device}")
 
         except ImportError:
@@ -267,7 +309,8 @@ class SLMAgent:
         Returns:
             str: The fully constructed prompt for the LLM.
         """
-        instruction = "You are an AI agent in a discussion. Provide a thoughtful response."
+        # 会話口調の指示に変更
+        instruction = "あなたは議論に参加するAIエージェントです。自然で親しみやすい口調で、思慮深い回答をしてください。専門用語を使う場合は分かりやすく説明し、相手との対話を大切にしながら発言してください。"
 
         prompt_parts = [instruction]
 
@@ -275,23 +318,23 @@ class SLMAgent:
             formatted_history = []
             for msg in conversation_history: # Iterate through what's passed (summary + recent verbatim)
                 if isinstance(msg, dict):
-                    sender_name = msg.get("agent_name", "Agent")
+                    sender_name = msg.get("agent_name", "エージェント")
                     text_content = msg.get("text", "")
 
                     if msg.get("type") == "summary":
                         # Summary text is already formatted by the summarizer, including its own internal newlines.
-                        formatted_history.append(text_content)
+                        formatted_history.append(f"これまでの議論の要約：\n{text_content}")
                     else:
                         # Truncate long individual verbatim messages
                         if len(text_content) > 150: # Increased truncation limit for verbatim messages
                             text_content = text_content[:150] + "..."
-                        formatted_history.append(f"{sender_name}: {text_content}")
+                        formatted_history.append(f"{sender_name}：「{text_content}」")
                 else: # Should ideally not happen if processed_history_for_prompt is well-formed
                     formatted_history.append(str(msg)[:150])
 
             if formatted_history:
                 # Use a more generic header as it might contain summary + recent, or just recent.
-                prompt_parts.append("Conversation Context:\n" + "\n".join(formatted_history))
+                prompt_parts.append("会話の流れ：\n" + "\n".join(formatted_history))
 
         boids_directive_text = ""
         # Boids manager still uses the potentially summarized history.
@@ -307,13 +350,46 @@ class SLMAgent:
         task_prompt = base_task_prompt[:200] + "..." if len(base_task_prompt) > 200 else base_task_prompt
 
         if boids_directive_text:
-            prompt_parts.append(f"Boids Suggestion: {boids_directive_text}")
+            prompt_parts.append(f"議論の方向性の提案：{boids_directive_text}")
 
-        prompt_parts.append(f"Task: {task_prompt}")
-        prompt_parts.append("Your response:")
+        prompt_parts.append(f"現在のお題：{task_prompt}")
+        prompt_parts.append("あなたの自然な会話での発言をお願いします：")
 
         final_prompt = "\n\n".join(prompt_parts)
         return final_prompt
+
+    def _post_process_response(self, response: str) -> str:
+        """
+        生成された応答を会話口調に後処理する
+        
+        Args:
+            response (str): 生成された応答
+            
+        Returns:
+            str: 会話口調に調整された応答
+        """
+        if not response or not response.strip():
+            return response
+            
+        # 基本的な後処理
+        processed = response.strip()
+        
+        # 文末の調整（より会話的に）
+        if processed and not processed.endswith(('。', '！', '？', 'ね', 'よ', 'です', 'ます')):
+            if len(processed) > 20:  # 長い文の場合
+                if not processed.endswith('.'):
+                    processed += "ですね。"
+            else:  # 短い文の場合
+                processed += "。"
+        
+        # 冒頭の調整
+        conversation_starters = ['そうですね、', 'なるほど、', 'たしかに、', 'そういえば、', 'ところで、']
+        if len(processed) > 30 and not any(processed.startswith(starter) for starter in conversation_starters):
+            if random.random() < 0.3:  # 30%の確率で会話的な接続詞を追加
+                starter = random.choice(['そうですね、', 'なるほど、', 'たしかに、'])
+                processed = starter + processed.lower()[0] + processed[1:] if processed else processed
+        
+        return processed
 
     async def run_conversation(self, initial_task_prompt: str, bb: "BlackBoard", max_turns: int = 10) -> None:
         """
@@ -328,10 +404,17 @@ class SLMAgent:
         """
         current_task_prompt = initial_task_prompt
         print(f"[DEBUG] Agent {self.id} ({self.name}/{self.role}) starting conversation (max_turns: {max_turns}, initial_task: '{current_task_prompt:.50}...')")
+        
         try:
             for turn in range(max_turns):
-                # シャットダウンフラグをチェック
-                if self.shutdown_flag:
+                print(f"[DEBUG] Agent {self.id} ({self.name}) starting turn {turn}...")
+                # シャットダウンフラグをチェック（ローカルとグローバル）
+                # Check for global shutdown from run_sim module
+                import sys
+                run_sim_module = sys.modules.get('slm_emergent_ai.run_sim') or sys.modules.get('__main__')
+                global_shutdown = getattr(run_sim_module, 'shutdown_requested', False) if run_sim_module else False
+                
+                if self.shutdown_flag or global_shutdown:
                     print(f"[INFO] Agent {self.id} ({self.name}/{self.role}) received shutdown signal, stopping conversation.")
                     break
 
@@ -365,7 +448,9 @@ class SLMAgent:
                     processed_history_for_prompt = raw_messages_for_history[-actual_num_recent_verbatim:]
 
                 prompt_for_llm = self._build_role_specific_prompt(current_task_prompt, processed_history_for_prompt)
+                print(f"[DEBUG] Agent {self.id} ({self.name}) turn {turn}: Generating response with prompt length {len(prompt_for_llm)}")
                 response = await self._generate_response(prompt_for_llm)
+                print(f"[DEBUG] Agent {self.id} ({self.name}) turn {turn}: Response generated: {response[:50] if response else 'None'}...")
                 
                 if response and response.strip():
                     message_to_post = {
@@ -393,8 +478,10 @@ class SLMAgent:
     async def _generate_response(self, prompt: str) -> str:
         """Generates a response from the LLM, using a global semaphore for model access."""
         global _model_semaphore
+        print(f"[DEBUG] Agent {self.id} ({self.name}) attempting to generate response...")
         async with _model_semaphore:
             try:
+                print(f"[DEBUG] Agent {self.id} ({self.name}) acquired model semaphore, calling LLM...")
                 loop = asyncio.get_event_loop()
                 # Fix: Use partial function to pass keyword arguments properly
                 from functools import partial
@@ -402,15 +489,20 @@ class SLMAgent:
                     self.model_wrapper.generate,
                     prompt,  # Pass prompt as positional argument
                     max_tokens=150,
-                    temperature=0.7,
+                    temperature=0.8,  # 少し高めの温度で自然さを向上
                     top_p=0.9,
                     repeat_penalty=1.1
                 )
                 response = await loop.run_in_executor(None, generate_func)
-                return response
+                
+                # 会話口調への後処理を追加
+                processed_response = self._post_process_response(response)
+                
+                print(f"[DEBUG] Agent {self.id} ({self.name}) LLM response received: {processed_response[:50] if processed_response else 'None'}...")
+                return processed_response
             except Exception as e:
                 print(f"[ERROR] Agent {self.id} ({self.name}/{self.role}) generation failed: {e}")
-                return f"[ERROR] Agent response generation error: {e}"
+                return f"すみません、応答の生成でエラーが発生しました：{e}"
 
     def shutdown(self):
         """エージェントの安全なシャットダウンを開始"""

@@ -7,8 +7,11 @@ MetaController - システム全体の制御と調整を行うコントローラ
 
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..memory.blackboard import BlackBoard
 
 class MetaController:
     """
@@ -87,8 +90,11 @@ class MetaController:
             λ_s_new = λ_s
         
         # Q学習による調整（状態を離散化）
-        state = self._discretize_state(stats)
+        state = await self._discretize_state(stats)
         action = self._select_action(state)
+        
+        # VDIに応じたλ_s自動調整ロジック（強化版）
+        vdi_value = stats.get('vdi', 0)
         
         # 行動に基づいてλを微調整
         if action == 0:  # λ_c増加
@@ -99,6 +105,31 @@ class MetaController:
             λ_a = self._clamp(λ_a + 0.02, 0.0, 1.0)
         elif action == 3:  # λ_a減少
             λ_a = self._clamp(λ_a - 0.02, 0.0, 1.0)
+        
+        # VDIベースのλ_s自動調整（追加ロジック）
+        if vdi_value < 0.2:  # 非常に低い多様性
+            λ_s_new = self._clamp(λ_s + 0.08, 0.0, 0.5)
+            print(f"[CONTROLLER] Very low VDI ({vdi_value:.3f}) - Significantly increasing λ_s to {λ_s_new:.3f}")
+        elif vdi_value < 0.4:  # 低い多様性
+            λ_s_new = self._clamp(λ_s + 0.04, 0.0, 0.5)
+            print(f"[CONTROLLER] Low VDI ({vdi_value:.3f}) - Increasing λ_s to {λ_s_new:.3f}")
+        elif vdi_value > 0.8:  # 非常に高い多様性
+            λ_s_new = self._clamp(λ_s - 0.06, 0.05, 0.5)
+            print(f"[CONTROLLER] Very high VDI ({vdi_value:.3f}) - Significantly decreasing λ_s to {λ_s_new:.3f}")
+        elif vdi_value > 0.6:  # 高い多様性
+            λ_s_new = self._clamp(λ_s - 0.03, 0.05, 0.5)
+            print(f"[CONTROLLER] High VDI ({vdi_value:.3f}) - Decreasing λ_s to {λ_s_new:.3f}")
+        
+        # 安定条件の再確認と調整
+        if λ_a + λ_c_new <= λ_s_new:
+            # λ_sが大きすぎる場合の調整
+            if λ_s_new > 0.3:
+                λ_s_new = self._clamp(λ_a + λ_c_new - 0.05, 0.05, 0.3)
+                print(f"[CONTROLLER] Stability constraint enforced - Reducing λ_s to {λ_s_new:.3f}")
+            else:
+                # λ_cを増加させて安定性を確保
+                λ_c_new = self._clamp(λ_s_new + 0.05 - λ_a, 0.1, 1.0)
+                print(f"[CONTROLLER] Stability constraint enforced - Increasing λ_c to {λ_c_new:.3f}")
         
         # スパイク検知によるEarlyStop
         if abs(err) > 5.0 or stats.get('speed', 0) < 0.5 * await self.bb.get_param('base_speed', 10.0):
@@ -236,8 +267,7 @@ class MetaController:
         speed_reward = min(speed_ratio, 1.0)
         
         # 総合報酬
-        reward = 0.4 * entropy_reward + 0.2 * vdi_reward + 0.2 * fcr_reward + 0.2 * speed_reward
-        
+        reward = 0.4 * entropy_reward + 0.2 * vdi_reward + 0.2 * fcr_reward + 0.2 * speed_reward        
         return reward
     
     async def run(self, interval: float = 1.0):
@@ -248,38 +278,60 @@ class MetaController:
         -----------
         interval: 調整間隔 (秒)
         """
-        while not self.early_stop:
-            # 統計情報を取得
-            stats = {
-                'entropy': await self.bb.get_param('entropy', 0.0),
-                'vdi': await self.bb.get_param('vdi', 0.0),
-                'fcr': await self.bb.get_param('fcr', 0.0),
-                'speed': await self.bb.get_param('speed', 0.0)
-            }
-            
-            # 現在の状態を取得
-            state = await self._discretize_state(stats)
-            
-            # 行動を選択
-            action = self._select_action(state)
-            
-            # λパラメータを調整
-            await self.adjust_lambda(stats)
-            
-            # 調整後の統計情報を取得
-            await asyncio.sleep(interval)
-            new_stats = {
-                'entropy': await self.bb.get_param('entropy', 0.0),
-                'vdi': await self.bb.get_param('vdi', 0.0),
-                'fcr': await self.bb.get_param('fcr', 0.0),
-                'speed': await self.bb.get_param('speed', 0.0)
-            }
-            
-            # 次の状態を取得
-            next_state = await self._discretize_state(new_stats)
-            
-            # 報酬を計算
-            reward = await self.calculate_reward(new_stats)
-            
-            # Q値を更新
-            self.update_Q(state, action, reward, next_state)
+        try:
+            while not self.early_stop:
+                # シャットダウンフラグをチェック
+                import sys
+                run_sim_module = sys.modules.get('slm_emergent_ai.run_sim') or sys.modules.get('__main__')
+                global_shutdown = getattr(run_sim_module, 'shutdown_requested', False) if run_sim_module else False
+                
+                if global_shutdown:
+                    print("[INFO] MetaController received global shutdown signal, stopping.")
+                    self.early_stop = True
+                    break
+                
+                # 統計情報を取得
+                stats = {
+                    'entropy': await self.bb.get_param('entropy', 0.0),
+                    'vdi': await self.bb.get_param('vdi', 0.0),
+                    'fcr': await self.bb.get_param('fcr', 0.0),
+                    'speed': await self.bb.get_param('speed', 0.0)
+                }
+                
+                # 現在の状態を取得
+                state = await self._discretize_state(stats)
+                
+                # 行動を選択
+                action = self._select_action(state)
+                
+                # λパラメータを調整
+                await self.adjust_lambda(stats)
+                
+                # 調整後の統計情報を取得
+                await asyncio.sleep(interval)
+                
+                # 再度シャットダウンチェック
+                if self.early_stop or global_shutdown:
+                    break
+                    
+                new_stats = {
+                    'entropy': await self.bb.get_param('entropy', 0.0),
+                    'vdi': await self.bb.get_param('vdi', 0.0),
+                    'fcr': await self.bb.get_param('fcr', 0.0),
+                    'speed': await self.bb.get_param('speed', 0.0)
+                }
+                
+                # 次の状態を取得
+                next_state = await self._discretize_state(new_stats)
+                
+                # 報酬を計算
+                reward = await self.calculate_reward(new_stats)
+                
+                # Q値を更新
+                self.update_Q(state, action, reward, next_state)
+        except asyncio.CancelledError:
+            print("[INFO] MetaController run loop cancelled gracefully.")
+        except Exception as e:
+            print(f"[ERROR] MetaController run loop failed: {e}")
+        finally:
+            print("[INFO] MetaController shut down complete.")

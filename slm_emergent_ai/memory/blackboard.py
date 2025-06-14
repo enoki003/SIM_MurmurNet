@@ -196,9 +196,19 @@ class BlackBoard:
         Any: 値 - The value of the parameter or the default.
         """
         print(f"[METRICS_DEBUG] BlackBoard.get_param called for key: {key}") # Adding requested debug print
+        
+        # BOIDSパラメータの詳細ログ
+        if key.startswith('λ_') or key in ['target_H', 'boids_enabled']:
+            print(f"[BOIDS_DEBUG] Retrieving BOIDS parameter: {key}")
+        
         try:
             value = self.backend.get_param(key, default)
             print(f"[METRICS_DEBUG] BlackBoard.get_param for '{key}' returned: {value}") # Also log returned value
+            
+            # BOIDSパラメータの場合は詳細ログ
+            if key.startswith('λ_') or key in ['target_H', 'boids_enabled']:
+                print(f"[BOIDS_DEBUG] BOIDS parameter '{key}' = {value} (type: {type(value).__name__})")
+            
             return value
         except Exception as e:
             print(f"Error getting parameter '{key}': {e}")

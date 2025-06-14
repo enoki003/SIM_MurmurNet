@@ -126,3 +126,38 @@ class ExportResponse(BaseModel):
     success: bool = Field(..., description="成功したかどうか")
     file_path: Optional[str] = Field(None, description="エクスポートされたファイルパス")
     error: Optional[str] = Field(None, description="エラーメッセージ")
+
+
+class BoidsConfig(BaseModel):
+    """BOIDSルール設定のスキーマ"""
+    lambda_a: float = Field(0.3, description="Alignment weight (共感性)")
+    lambda_c: float = Field(0.3, description="Cohesion weight (結束力)")
+    lambda_s: float = Field(0.1, description="Separation weight (独自性)")
+    target_entropy: float = Field(5.0, description="目標エントロピー値")
+    similarity_threshold: float = Field(0.9, description="類似度閾値")
+    diversity_threshold: float = Field(0.7, description="多様性閾値")
+    alignment_threshold: float = Field(0.8, description="共感閾値")
+    cohesion_threshold: float = Field(0.6, description="結束閾値")
+    enabled: bool = Field(True, description="BOIDSルール有効化")
+
+
+class BoidsConfigUpdateRequest(BaseModel):
+    """BOIDSルール設定更新リクエストのスキーマ"""
+    config: BoidsConfig = Field(..., description="BOIDSルール設定")
+
+
+class BoidsConfigUpdateResponse(BaseModel):
+    """BOIDSルール設定更新レスポンスのスキーマ"""
+    success: bool = Field(..., description="成功したかどうか")
+    updated_config: Optional[BoidsConfig] = Field(None, description="更新後の設定")
+    error: Optional[str] = Field(None, description="エラーメッセージ")
+
+
+class RealTimeMetrics(BaseModel):
+    """リアルタイムメトリクスのスキーマ"""
+    entropy: float = Field(0.0, description="現在のエントロピー値")
+    vdi: float = Field(0.0, description="語彙多様性指数")
+    fcr: float = Field(0.0, description="議論の一貫性")
+    speed: float = Field(0.0, description="会話のテンポ")
+    boids_weights: BoidsConfig = Field(..., description="現在のBOIDSパラメータ")
+    adjustment_history: List[Dict[str, float]] = Field([], description="調整履歴")

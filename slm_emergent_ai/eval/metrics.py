@@ -9,23 +9,92 @@ import time
 import numpy as np
 from typing import Dict, List, Any, Optional, Union
 import re
+from sklearn.metrics.pairwise import cosine_similarity
 
 
-def calculate_entropy(probs: np.ndarray) -> float:
+def calculate_entropy(data: List[Dict[str, Any]], agent_key: str = "agent_id") -> float:
     """
-    確率分布のエントロピーを計算
+    エージェント活動からエントロピーを計算（符号修正済み）
     
     Parameters:
     -----------
-    probs: 確率分布
+    data: メッセージデータのリスト
+    agent_key: エージェントIDのキー
     
     Returns:
     --------
-    エントロピー値
+    エントロピー値（正の値）
     """
-    # 0の確率を小さな値に置き換えて対数計算を安定化
-    probs = np.clip(probs, 1e-10, 1.0)
-    return -np.sum(probs * np.log2(probs))
+    if not data:
+        return 0.0
+    
+    # エージェント別のメッセージ数をカウント
+    agent_counts = {}
+    for item in data:
+        if isinstance(item, dict) and agent_key in item:
+            agent_id = item[agent_key]
+            agent_counts[agent_id] = agent_counts.get(agent_id, 0) + 1
+    
+    if not agent_counts:
+        return 0.0
+    
+    # 確率を計算
+    total_messages = sum(agent_counts.values())
+    probabilities = [count / total_messages for count in agent_counts.values()]
+    
+    # エントロピー計算（符号修正：負号を使用して正の値にする）
+    entropy = -sum(p * np.log2(p + 1e-10) for p in probabilities if p > 0)
+    
+    return max(0.0, entropy)  # 念のため非負値を保証
+
+def calculate_similarity_matrix_without_diagonal(embeddings: np.ndarray) -> np.ndarray:
+    """
+    対角セルを除去した類似度行列を計算
+    
+    Parameters:
+    -----------
+    embeddings: 埋め込みベクトルの配列
+    
+    Returns:
+    --------
+    対角セルを除去した類似度行列
+    """
+    if len(embeddings) < 2:
+        return np.array([])
+    
+    # 類似度行列を計算
+    similarity_matrix = cosine_similarity(embeddings)
+    
+    # 対角セルをNaNに設定して除外
+    np.fill_diagonal(similarity_matrix, np.nan)
+    
+    return similarity_matrix
+
+def calculate_diversity_score(similarity_matrix: np.ndarray) -> float:
+    """
+    対角セル除去済み類似度行列から多様性スコアを計算
+    
+    Parameters:
+    -----------
+    similarity_matrix: 対角セル除去済み類似度行列
+    
+    Returns:
+    --------
+    多様性スコア（1 - 平均類似度）
+    """
+    if similarity_matrix.size == 0:
+        return 0.0
+    
+    # NaNを除いた有効な類似度値のみを使用
+    valid_similarities = similarity_matrix[~np.isnan(similarity_matrix)]
+    
+    if len(valid_similarities) == 0:
+        return 0.0
+    
+    avg_similarity = np.mean(valid_similarities)
+    diversity_score = 1.0 - avg_similarity
+    
+    return max(0.0, min(1.0, diversity_score))
 
 
 def calculate_vdi(tokens: List[int], window_size: int = 100) -> float:
@@ -233,3 +302,47 @@ class MetricsTracker:
         メトリクス辞書
         """
         return self.current_metrics.copy()
+    
+    def calculate_advanced_entropy(self, messages: List[Dict[str, Any]]) -> float:
+        """
+        高度なエントロピー計算（複数の要素を考慮）
+        """
+        if not messages:
+            return 0.0
+        
+        # エージェント活動のエントロピー
+        agent_entropy = calculate_entropy(messages, "agent_id")
+        
+        # 時間的分布のエントロピー（時間帯別活動）
+        if len(messages) > 5:
+            timestamps = [msg.get("timestamp", 0) for msg in messages if isinstance(msg, dict)]
+            if timestamps:
+                # 時間を区間に分割してエントロピーを計算
+                time_bins = np.histogram(timestamps, bins=min(10, len(timestamps)))[0]
+                time_probs = time_bins / np.sum(time_bins) if np.sum(time_bins) > 0 else []
+                time_entropy = -sum(p * np.log2(p + 1e-10) for p in time_probs if p > 0)
+            else:
+                time_entropy = 0.0
+        else:
+            time_entropy = 0.0
+        
+        # 重み付き合成エントロピー
+        combined_entropy = 0.7 * agent_entropy + 0.3 * time_entropy
+        
+        return combined_entropy
+    
+    def update_with_advanced_metrics(self, messages: List[Dict[str, Any]], 
+                                   embeddings: Optional[np.ndarray] = None):
+        """
+        高度なメトリクス計算での更新
+        """
+        # 修正済みエントロピー計算
+        entropy = self.calculate_advanced_entropy(messages)
+        self.update_entropy(entropy)
+        
+        # 対角セル除去での多様性計算
+        if embeddings is not None and len(embeddings) > 1:
+            similarity_matrix = calculate_similarity_matrix_without_diagonal(embeddings)
+            diversity = calculate_diversity_score(similarity_matrix)
+            self.update_vdi(diversity)
+        

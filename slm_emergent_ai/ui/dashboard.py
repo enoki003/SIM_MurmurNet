@@ -96,385 +96,26 @@ class Dashboard:
             async def inject_prompt(data: Dict[str, str]):
                 return await self._inject_prompt(data.get("prompt", ""))
             
+            # BOIDSパラメータ調整エンドポイント
+            @self.app.get("/api/boids/config")
+            async def get_boids_config():
+                return await self._get_boids_config()
+            
+            @self.app.post("/api/boids/config")
+            async def update_boids_config(request: Dict[str, Any]):
+                return await self._update_boids_config(request)
+            
+            @self.app.get("/api/boids/presets")
+            async def get_boids_presets():
+                return await self._get_boids_presets()
+            
+            @self.app.post("/api/boids/presets/{preset_name}")
+            async def apply_boids_preset(preset_name: str):
+                return await self._apply_boids_preset(preset_name)
+            
             print(f"Dashboard initialized on port {self.port}")
         except Exception as e:
             print(f"Error initializing dashboard: {e}")
-    
-    def _get_dashboard_html(self) -> str:
-        """ダッシュボードのHTMLを取得"""
-        return """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>SLM Emergent AI Dashboard</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <script src="https://cdn.jsdelivr.net/npm/vue@3.2.47/dist/vue.global.js"></script>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-            <style>
-                body { padding: 20px; background-color: #f8f9fa; }
-                .card { margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                .card-header { background-color: #343a40; color: white; }
-                .metrics-value { font-size: 24px; font-weight: bold; }
-                .chart-container { height: 300px; }
-                .log-container { height: 300px; overflow-y: auto; background-color: #f5f5f5; padding: 10px; border-radius: 5px; }
-                .log-entry { margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
-                .control-panel { background-color: #e9ecef; padding: 15px; border-radius: 5px; }
-            </style>
-        </head>
-        <body>
-            <div id="app" class="container-fluid">
-                <h1 class="mb-4">SLM Emergent AI Dashboard</h1>
-                
-                <div class="row">
-                    <div class="col-md-8">
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">Metrics Over Time</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="chart-container">
-                                    <canvas id="metricsChart"></canvas>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="col-md-4">
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">Current Metrics</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">エントロピー (H)</div>
-                                        <div class="metrics-value">{{ typeof metrics.entropy === 'number' ? metrics.entropy.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">多様性 (VDI)</div>
-                                        <div class="metrics-value">{{ typeof metrics.vdi === 'number' ? metrics.vdi.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">協調性 (FCR)</div>
-                                        <div class="metrics-value">{{ typeof metrics.fcr === 'number' ? metrics.fcr.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">速度 (トークン/秒)</div>
-                                        <div class="metrics-value">{{ typeof metrics.speed === 'number' ? metrics.speed.toFixed(2) : '0.00' }}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="row mt-4">
-                    <div class="col-md-8">
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">BlackBoard Messages</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="log-container">
-                                    <div v-for="(message, index) in blackboardMessages" :key="index" class="log-entry">
-                                        <div class="d-flex">
-                                            <span class="me-2 text-primary"><strong>{{ message.agent_id }}:</strong></span>
-                                            <span>{{ message.text }}</span>
-                                            <small class="ms-2 text-muted">{{ message.timestamp }}</small>
-                                        </div>
-                                    </div>
-                                    <div v-if="blackboardMessages.length === 0" class="text-center text-muted">
-                                        メッセージはまだありません
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="col-md-4">
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">Control Panel</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="control-panel">
-                                    <div class="mb-3">
-                                        <label for="promptInput" class="form-label">Live Prompt Inject</label>
-                                        <textarea class="form-control" id="promptInput" v-model="promptInput" rows="3" placeholder="Enter prompt to inject..."></textarea>
-                                    </div>
-                                    <button class="btn btn-primary" @click="injectPrompt">Inject Prompt</button>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="mb-0">System Status</h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">RAM Usage</div>
-                                        <div class="metrics-value">{{ systemStatus.ram }}%</div>
-                                    </div>
-                                    <div class="col-6 mb-3">
-                                        <div class="text-muted">CPU Usage</div>
-                                        <div class="metrics-value">{{ systemStatus.cpu }}%</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <script>                        const { createApp, ref, onMounted, onUnmounted } = Vue;
-                
-                createApp({
-                    setup() {
-                        // リアクティブデータ
-                        const metrics = ref({
-                            entropy: 4.5,
-                            vdi: 0.7,
-                            fcr: 0.9,
-                            speed: 15.0
-                        });
-                        
-                        const blackboardMessages = ref([]);
-                        const promptInput = ref('');
-                        const systemStatus = ref({
-                            ram: 0,
-                            cpu: 0
-                        });
-                        
-                        // WebSocket接続
-                        let websocket = null;
-                        let metricsChart = null;
-                        let metricsData = [];
-                        
-                        // WebSocket接続
-                        const connectWebSocket = () => {
-                            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                            const wsUrl = `${protocol}//${window.location.host}/ws`;
-                            
-                            websocket = new WebSocket(wsUrl);
-                            
-                            websocket.onopen = () => {
-                                console.log('WebSocket connected');
-                                // メトリクスとブラックボードの購読
-                                websocket.send(JSON.stringify({type: 'subscribe', channel: 'metrics'}));
-                                websocket.send(JSON.stringify({type: 'subscribe', channel: 'blackboard'}));
-                            };
-                            
-                            websocket.onmessage = (event) => {
-                                const data = JSON.parse(event.data);
-                                handleWebSocketMessage(data);
-                            };
-                            
-                            websocket.onclose = () => {
-                                console.log('WebSocket disconnected');
-                                // 再接続を試行
-                                setTimeout(connectWebSocket, 3000);
-                            };
-                            
-                            websocket.onerror = (error) => {
-                                console.error('WebSocket error:', error);
-                            };
-                        };
-                        
-                        // WebSocketメッセージハンドラ
-                        const handleWebSocketMessage = (data) => {
-                            if (data.type === 'metrics') {
-                                // メトリクスを更新（lambdaパラメータを含む）
-                                metrics.value = { ...metrics.value, ...data.data };
-                                updateChart();
-                            } else if (data.type === 'blackboard') {
-                                // ブラックボードメッセージを更新
-                                blackboardMessages.value = data.data.messages || [];
-                                
-                                // スクロールを最下部に自動的に移動
-                                setTimeout(() => {
-                                    const logContainer = document.querySelector('.log-container');
-                                    if (logContainer) {
-                                        logContainer.scrollTop = logContainer.scrollHeight;
-                                    }
-                                }, 100);
-                            }
-                        };
-                        
-                        // チャートの初期化
-                        const initChart = () => {
-                            const ctx = document.getElementById('metricsChart').getContext('2d');
-                            metricsChart = new Chart(ctx, {
-                                type: 'line',
-                                data: {
-                                    labels: [],
-                                    datasets: [
-                                        {
-                                            label: 'Entropy',
-                                            data: [],
-                                            borderColor: 'rgb(255, 99, 132)',
-                                            backgroundColor: 'rgba(255, 99, 132, 0.2)',
-                                            tension: 0.1
-                                        },
-                                        {
-                                            label: 'VDI',
-                                            data: [],
-                                            borderColor: 'rgb(54, 162, 235)',
-                                            backgroundColor: 'rgba(54, 162, 235, 0.2)',
-                                            tension: 0.1
-                                        },
-                                        {
-                                            label: 'FCR',
-                                            data: [],
-                                            borderColor: 'rgb(255, 205, 86)',
-                                            backgroundColor: 'rgba(255, 205, 86, 0.2)',
-                                            tension: 0.1
-                                        }
-                                    ]
-                                },
-                                options: {
-                                    responsive: true,
-                                    maintainAspectRatio: false,
-                                    scales: {
-                                        y: {
-                                            beginAtZero: true
-                                        }
-                                    },
-                                    plugins: {
-                                        legend: {
-                                            position: 'top',
-                                        },
-                                        title: {
-                                            display: true,
-                                            text: 'Metrics Over Time'
-                                        }
-                                    }
-                                }
-                            });
-                        };
-                        
-                        // チャートの更新
-                        const updateChart = () => {
-                            if (!metricsChart) return;
-                            
-                            const now = new Date().toLocaleTimeString();
-                            metricsData.push({
-                                time: now,
-                                entropy: metrics.value.entropy,
-                                vdi: metrics.value.vdi,
-                                fcr: metrics.value.fcr
-                            });
-                            
-                            // 最大50ポイントまで保持
-                            if (metricsData.length > 50) {
-                                metricsData.shift();
-                            }
-                            
-                            metricsChart.data.labels = metricsData.map(d => d.time);
-                            metricsChart.data.datasets[0].data = metricsData.map(d => d.entropy);
-                            metricsChart.data.datasets[1].data = metricsData.map(d => d.vdi);
-                            metricsChart.data.datasets[2].data = metricsData.map(d => d.fcr);
-                            metricsChart.update('none');
-                        };
-                        
-                        // プロンプト注入
-                        const injectPrompt = async () => {
-                            if (!promptInput.value.trim()) return;
-                            
-                            try {
-                                const response = await fetch('/api/inject', {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json',
-                                    },
-                                    body: JSON.stringify({ prompt: promptInput.value })
-                                });
-                                
-                                if (response.ok) {
-                                    promptInput.value = '';
-                                    console.log('Prompt injected successfully');
-                                } else {
-                                    console.error('Failed to inject prompt');
-                                }
-                            } catch (error) {
-                                console.error('Error injecting prompt:', error);
-                            }
-                        };
-                        
-                        // 定期的なデータフェッチ
-                        const fetchData = async () => {
-                            try {
-                                // メトリクスを取得
-                                const metricsResponse = await fetch('/api/metrics');
-                                if (metricsResponse.ok) {
-                                    const metricsData = await metricsResponse.json();
-                                    metrics.value = { ...metrics.value, ...metricsData };
-                                    
-                                    // システムリソース使用状況
-                                    const cpuUsage = Math.floor(Math.random() * 30) + 20; // 20-50%範囲で変動
-                                    const ramUsage = Math.floor(Math.random() * 20) + 40; // 40-60%範囲で変動
-                                    
-                                    systemStatus.value = {
-                                        ram: ramUsage,
-                                        cpu: cpuUsage
-                                    };
-                                    
-                                    updateChart();
-                                }
-                                
-                                // ブラックボードデータを取得
-                                const blackboardResponse = await fetch('/api/blackboard');
-                                if (blackboardResponse.ok) {
-                                    const blackboardData = await blackboardResponse.json();
-                                    blackboardMessages.value = blackboardData.messages || [];
-                                }
-                            } catch (error) {
-                                console.error('Error fetching data:', error);
-                            }
-                        };
-                        
-                        // 定期更新の設定
-                        let updateInterval = null;
-                        
-                        onMounted(() => {
-                            // チャートの初期化
-                            setTimeout(initChart, 100);
-                            
-                            // WebSocket接続
-                            connectWebSocket();
-                            
-                            // 定期的なデータフェッチ（WebSocketがうまく行かない場合のフォールバック）
-                            updateInterval = setInterval(fetchData, 2000);
-                            
-                            // 初回データフェッチ
-                            fetchData();
-                        });
-                        
-                        onUnmounted(() => {
-                            if (websocket) {
-                                websocket.close();
-                            }
-                            if (updateInterval) {
-                                clearInterval(updateInterval);
-                            }
-                        });
-                        
-                        return {
-                            metrics,
-                            blackboardMessages,
-                            promptInput,
-                            systemStatus,
-                            injectPrompt
-                        };
-                    }
-                }).mount('#app');
-            </script>
-        </body>
-        </html>
-        """
     
     async def _handle_websocket_message(self, websocket: WebSocket, data: str):
         """WebSocketメッセージを処理"""
@@ -495,76 +136,69 @@ class Dashboard:
     
     async def _fetch_metrics(self) -> Dict[str, Any]:
         """メトリクスを取得"""
-        # This method is called by an API endpoint and by internal polling in Vue (fetchData).
-        # It should ideally fetch from a single source of truth, e.g., MetricsTracker via BlackBoard.
         metrics_to_return = {}
         try:
             if self.bb:
-                # Attempt to get consolidated metrics from a single source if possible
-                # For now, continue with individual param fetching as per existing logic
-                # but this is where it could be simplified if MetricsTracker posts its full dict to bb.
                 try:
-                    entropy = await self.bb.get_param("entropy", 0.0) # Default to 0 if not set
-                    target_H = await self.bb.get_param("target_H", 5.0) # Example value
+                    entropy = await self.bb.get_param("entropy", 0.0)
+                    target_H = await self.bb.get_param("target_H", 5.0)
+                    
+                    # BOIDSパラメータを取得
+                    lambda_c = await self.bb.get_param("λ_c", 0.3)
+                    lambda_a = await self.bb.get_param("λ_a", 0.3)
+                    lambda_s = await self.bb.get_param("λ_s", 0.1)
+                    boids_enabled = await self.bb.get_param("boids_enabled", True)
+                    
+                    # 自動調整状況の情報を追加
+                    vdi = await self.bb.get_param("vdi", 0.0)
+                    auto_adjustment_status = "正常"
+                    
+                    # VDIベースの自動調整状況を判定
+                    if vdi < 0.3:
+                        auto_adjustment_status = "多様性不足→独自性強化中"
+                    elif vdi > 0.7:
+                        auto_adjustment_status = "多様性過多→収束促進中"
+                    elif abs(entropy - target_H) > 1.0:
+                        auto_adjustment_status = "エントロピー調整中"
                     
                     metrics_to_return = {
                         "entropy": float(entropy),
-                        "vdi": float(await self.bb.get_param("vdi", 0.0)),
-                        "fcr": float(await self.bb.get_param("fcr", 1.0)), # Default FCR is 1.0
+                        "vdi": float(vdi),
+                        "fcr": float(await self.bb.get_param("fcr", 1.0)),
                         "speed": float(await self.bb.get_param("speed", 0.0)),
-                        "target_H": float(target_H) # Example, if used by controller
+                        "target_H": float(target_H),
+                        "lambda_c": float(lambda_c),
+                        "lambda_a": float(lambda_a),
+                        "lambda_s": float(lambda_s),
+                        "boids_enabled": bool(boids_enabled),
+                        "auto_adjustment_status": auto_adjustment_status,
+                        "stability_check": lambda_a + lambda_c > lambda_s,
+                        "entropy_error": entropy - target_H
                     }
+                    
+                    print(f"[BOIDS_DEBUG] Dashboard._fetch_metrics BOIDS params: λ_c={lambda_c:.3f}, λ_a={lambda_a:.3f}, λ_s={lambda_s:.3f}, enabled={boids_enabled}")
                     print(f"[METRICS_DEBUG] Dashboard._fetch_metrics returning from bb.get_param: {metrics_to_return}")
                     return metrics_to_return
                 except Exception as e_get_param:
-                    print(f"[METRICS_DEBUG] Error fetching individual params from BlackBoard: {e_get_param}. Trying pull.")
+                    print(f"[METRICS_DEBUG] Error fetching individual params from BlackBoard: {e_get_param}")
                     pass
                 
-                # Fallback: Try to get metrics from latest messages if direct get_param fails or is partial
-                # This part of logic might be redundant if metrics are consistently stored via set_param
-                # by the MetricsTracker via run_sim.py.
-                messages = await self.bb.pull(k=50)
-                latest_metrics = {
-                    "entropy": 4.5,
-                    "vdi": 0.7,
-                    "fcr": 0.9,
-                    "speed": 15.0
-                }
+                # 代替手段としてpullメソッドを使用してメトリクスを取得
+                try:
+                    metrics_list = await self.bb.pull(k=10)  # 最新のメトリクスを10件取得
+                    print(f"[METRICS_DEBUG] Fetched metrics from pull: {metrics_list}")
+                    
+                    # メトリクスリストから最新の値を抽出
+                    for metric in metrics_list:
+                        if isinstance(metric, dict):
+                            for key, value in metric.items():
+                                if key in ["entropy", "vdi", "fcr", "speed", "target_H"]:
+                                    metrics_to_return[key] = float(value)
                 
-                # メッセージからメトリクス情報を抽出
-                for msg in messages:
-                    if isinstance(msg, dict):
-                        # メトリクス情報が含まれている場合
-                        if 'metrics' in msg:
-                            if isinstance(msg['metrics'], dict):
-                                # メトリクス辞書を更新
-                                for key, value in msg['metrics'].items():
-                                    if key in latest_metrics and isinstance(value, (int, float)):
-                                        latest_metrics[key] = float(value)
-                        
-                        # 個別のメトリクス値が含まれている場合
-                        for key in ['entropy', 'vdi', 'fcr', 'speed']:
-                            if key in msg and isinstance(msg[key], (int, float, str)):
-                                try:
-                                    latest_metrics[key] = float(msg[key])
-                                except (ValueError, TypeError):
-                                    pass  # 数値に変換できない場合はスキップ
+                except Exception as e_pull:
+                    print(f"[METRICS_DEBUG] Error fetching metrics from pull: {e_pull}")
+                    raise e_pull  # Reraise to be caught by the outer exception handler
                 
-                # This fallback logic might be simplified if metrics are reliably in bb.get_param
-                # For now, keeping a simplified version of it.
-                # If the above try block with get_param succeeded, this won't be reached.
-                print("[METRICS_DEBUG] Dashboard._fetch_metrics: bb.get_param path failed or was incomplete, trying pull for latest_metrics.")
-                messages = await self.bb.pull(k=1) # Check latest message for metrics update
-                latest_metrics_from_msg = {}
-                if messages and isinstance(messages[0], dict) and 'metrics' in messages[0]:
-                    latest_metrics_from_msg = messages[0]['metrics']
-
-                # Merge or select based on what was successfully fetched
-                # Prioritize values from get_param if they were fetched.
-                # This part is complex and depends on how metrics are stored.
-                # Assuming for now that if get_param path failed, we use a default or empty.
-                # The UI has its own defaults in Vue.
-
                 # If metrics_to_return is still empty, use a default structure.
                 if not metrics_to_return:
                     metrics_to_return = {
@@ -579,6 +213,139 @@ class Dashboard:
         except Exception as e:
             print(f"[METRICS_DEBUG] Error in _fetch_metrics: {e}")
             return { "entropy": 0.0, "vdi": 0.0, "fcr": 1.0, "speed": 0.0, "target_H": 0.0 }
+
+    async def _get_boids_config(self) -> Dict[str, Any]:
+        """現在のBOIDSパラメータ設定を取得"""
+        try:
+            if self.bb:
+                config = {
+                    "lambda_a": await self.bb.get_param("λ_a", 0.3),
+                    "lambda_c": await self.bb.get_param("λ_c", 0.3),
+                    "lambda_s": await self.bb.get_param("λ_s", 0.1),
+                    "target_entropy": await self.bb.get_param("target_H", 5.0),
+                    "enabled": await self.bb.get_param("boids_enabled", True),
+                    "similarity_threshold": await self.bb.get_param("similarity_threshold", 0.9),
+                    "diversity_threshold": await self.bb.get_param("diversity_threshold", 0.7),
+                    "alignment_threshold": await self.bb.get_param("alignment_threshold", 0.8),
+                    "cohesion_threshold": await self.bb.get_param("cohesion_threshold", 0.6)
+                }
+                return {"success": True, "config": config}
+            else:
+                return {"success": False, "error": "BlackBoard not available"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def _update_boids_config(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """BOIDSパラメータ設定を更新"""
+        try:
+            if not self.bb:
+                return {"success": False, "error": "BlackBoard not available"}
+            
+            config = request.get("config", {})
+            
+            # パラメータの検証と制約
+            lambda_a = max(0.0, min(1.0, config.get("lambda_a", 0.3)))
+            lambda_c = max(0.0, min(1.0, config.get("lambda_c", 0.3)))
+            lambda_s = max(0.0, min(1.0, config.get("lambda_s", 0.1)))
+            
+            # 安定性制約の確認
+            if lambda_a + lambda_c <= lambda_s:
+                lambda_s = max(0.0, lambda_a + lambda_c - 0.05)
+            
+            target_entropy = max(0.0, min(10.0, config.get("target_entropy", 5.0)))
+            
+            # BlackBoardに設定を保存
+            await self.bb.set_param("λ_a", lambda_a)
+            await self.bb.set_param("λ_c", lambda_c)
+            await self.bb.set_param("λ_s", lambda_s)
+            await self.bb.set_param("target_H", target_entropy)
+            await self.bb.set_param("boids_enabled", config.get("enabled", True))
+            
+            # 閾値パラメータも更新
+            await self.bb.set_param("similarity_threshold", config.get("similarity_threshold", 0.9))
+            await self.bb.set_param("diversity_threshold", config.get("diversity_threshold", 0.7))
+            await self.bb.set_param("alignment_threshold", config.get("alignment_threshold", 0.8))
+            await self.bb.set_param("cohesion_threshold", config.get("cohesion_threshold", 0.6))
+            
+            # 更新通知をブロードキャスト
+            await self.broadcast({
+                "type": "boids_config_updated",
+                "data": {
+                    "lambda_a": lambda_a,
+                    "lambda_c": lambda_c,
+                    "lambda_s": lambda_s,
+                    "target_entropy": target_entropy,
+                    "enabled": config.get("enabled", True)
+                }
+            })
+            
+            updated_config = {
+                "lambda_a": lambda_a,
+                "lambda_c": lambda_c,
+                "lambda_s": lambda_s,
+                "target_entropy": target_entropy,
+                "enabled": config.get("enabled", True)
+            }
+            
+            return {"success": True, "updated_config": updated_config}
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def _get_boids_presets(self) -> Dict[str, Any]:
+        """BOIDSプリセット設定を取得"""
+        presets = {
+            "balanced": {
+                "name": "バランス重視",
+                "description": "議論のバランスを重視した設定",
+                "lambda_a": 0.3,
+                "lambda_c": 0.3,
+                "lambda_s": 0.1,
+                "target_entropy": 5.0
+            },
+            "creative": {
+                "name": "創造性重視",
+                "description": "創造的で多様な発言を促進",
+                "lambda_a": 0.2,
+                "lambda_c": 0.2,
+                "lambda_s": 0.3,
+                "target_entropy": 6.5
+            },
+            "focused": {
+                "name": "集中重視",
+                "description": "話題の集中と一貫性を重視",
+                "lambda_a": 0.4,
+                "lambda_c": 0.5,
+                "lambda_s": 0.05,
+                "target_entropy": 3.5
+            },
+            "dynamic": {
+                "name": "動的議論",
+                "description": "活発で動的な議論を促進",
+                "lambda_a": 0.35,
+                "lambda_c": 0.25,
+                "lambda_s": 0.2,
+                "target_entropy": 5.5
+            }
+        }
+        return {"success": True, "presets": presets}
+    
+    async def _apply_boids_preset(self, preset_name: str) -> Dict[str, Any]:
+        """BOIDSプリセットを適用"""
+        try:
+            presets_response = await self._get_boids_presets()
+            presets = presets_response.get("presets", {})
+            
+            if preset_name not in presets:
+                return {"success": False, "error": f"Unknown preset: {preset_name}"}
+            
+            preset = presets[preset_name]
+            config_request = {"config": preset}
+            
+            return await self._update_boids_config(config_request)
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     async def _fetch_blackboard(self) -> Dict[str, Any]:
         """BlackBoardの情報を取得"""
@@ -683,6 +450,434 @@ class Dashboard:
         except Exception as e:
             print(f"Error injecting prompt: {e}")
             return {"status": "error", "message": str(e)}
+    
+    def _get_dashboard_html(self) -> str:
+        """ダッシュボードのHTMLを取得"""
+        return """
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>SLM Emergent AI Dashboard</title>
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+            <script src="https://cdn.jsdelivr.net/npm/vue@3.2.47/dist/vue.global.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+            <style>
+                body { padding: 20px; background-color: #f8f9fa; }
+                .card { margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                .card-header { background-color: #343a40; color: white; }
+                .metrics-value { font-size: 24px; font-weight: bold; }
+                .chart-container { height: 300px; }
+                .log-container { height: 300px; overflow-y: auto; background-color: #f5f5f5; padding: 10px; border-radius: 5px; }
+                .log-entry { margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+                .control-panel { background-color: #e9ecef; padding: 15px; border-radius: 5px; }
+                .conversation-text { font-style: italic; color: #495057; line-height: 1.4; }
+                .boids-control { background-color: #fff3cd; padding: 15px; border-radius: 5px; border-left: 4px solid #ffc107; }
+                .preset-button { margin: 2px; }
+                .slider-container { margin: 10px 0; }
+                .slider-label { display: flex; justify-content: space-between; font-size: 0.9em; margin-bottom: 5px; }
+                .range-input { width: 100%; }
+            </style>
+        </head>
+        <body>
+            <div id="app" class="container-fluid">
+                <h1 class="mb-4">SLM Emergent AI Dashboard</h1>
+                
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Metrics Over Time</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="chart-container">
+                                    <canvas id="metricsChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Current Metrics</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">エントロピー (H)</div>
+                                        <div class="metrics-value">{{ typeof metrics.entropy === 'number' ? metrics.entropy.toFixed(2) : '0.00' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">多様性 (VDI)</div>
+                                        <div class="metrics-value">{{ typeof metrics.vdi === 'number' ? metrics.vdi.toFixed(2) : '0.00' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">協調性 (FCR)</div>
+                                        <div class="metrics-value">{{ typeof metrics.fcr === 'number' ? metrics.fcr.toFixed(2) : '0.00' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">速度 (トークン/秒)</div>
+                                        <div class="metrics-value">{{ typeof metrics.speed === 'number' ? metrics.speed.toFixed(2) : '0.00' }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 新しいBOIDSデバッグセクション -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">BOIDS Rule Debug</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">λ_c (Cohesion)</div>
+                                        <div class="metrics-value">{{ typeof metrics.lambda_c === 'number' ? metrics.lambda_c.toFixed(3) : '0.000' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">λ_a (Alignment)</div>
+                                        <div class="metrics-value">{{ typeof metrics.lambda_a === 'number' ? metrics.lambda_a.toFixed(3) : '0.000' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">λ_s (Separation)</div>
+                                        <div class="metrics-value">{{ typeof metrics.lambda_s === 'number' ? metrics.lambda_s.toFixed(3) : '0.000' }}</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">Target H</div>
+                                        <div class="metrics-value">{{ typeof metrics.target_H === 'number' ? metrics.target_H.toFixed(2) : '0.00' }}</div>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-12 mb-2">
+                                        <div class="text-muted">BOIDS Rule Status</div>
+                                        <div class="small text-success" v-if="metrics.boids_enabled">✓ 有効</div>
+                                        <div class="small text-warning" v-else>✗ 無効</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="row mt-4">
+                    <div class="col-md-8">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">BlackBoard Messages</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="log-container">
+                                    <div v-for="(message, index) in blackboardMessages" :key="index" class="log-entry">
+                                        <div class="d-flex">
+                                            <span class="me-2 text-primary"><strong>{{ message.agent_id }}:</strong></span>
+                                            <span>{{ message.text }}</span>
+                                            <small class="ms-2 text-muted">{{ message.timestamp }}</small>
+                                        </div>
+                                    </div>
+                                    <div v-if="blackboardMessages.length === 0" class="text-center text-muted">
+                                        メッセージはまだありません
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-4">
+                        <!-- BOIDSパラメータ調整パネル -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">会話ダイナミクス調整</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="boids-control">
+                                    <!-- プリセットボタン -->
+                                    <div class="mb-3">
+                                        <label class="form-label"><strong>プリセット設定</strong></label>
+                                        <div>
+                                            <button v-for="(preset, key) in boidsPresets" :key="key" 
+                                                    class="btn btn-sm btn-outline-primary preset-button"
+                                                    @click="applyPreset(key)">
+                                                {{ preset.name }}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- 手動調整スライダー -->
+                                    <div class="slider-container">
+                                        <div class="slider-label">
+                                            <span>共感性 (λ_a)</span>
+                                            <span>{{ boidsConfig.lambda_a.toFixed(3) }}</span>
+                                        </div>
+                                        <input type="range" class="range-input" 
+                                               v-model="boidsConfig.lambda_a" 
+                                               min="0" max="0.8" step="0.01"
+                                               @input="updateBoidsConfig">
+                                    </div>
+                                    
+                                    <div class="slider-container">
+                                        <div class="slider-label">
+                                            <span>結束力 (λ_c)</span>
+                                            <span>{{ boidsConfig.lambda_c.toFixed(3) }}</span>
+                                        </div>
+                                        <input type="range" class="range-input" 
+                                               v-model="boidsConfig.lambda_c" 
+                                               min="0" max="0.8" step="0.01"
+                                               @input="updateBoidsConfig">
+                                    </div>
+                                    
+                                    <div class="slider-container">
+                                        <div class="slider-label">
+                                            <span>独自性 (λ_s)</span>
+                                            <span>{{ boidsConfig.lambda_s.toFixed(3) }}</span>
+                                        </div>
+                                        <input type="range" class="range-input" 
+                                               v-model="boidsConfig.lambda_s" 
+                                               min="0" max="0.5" step="0.01"
+                                               @input="updateBoidsConfig">
+                                    </div>
+                                    
+                                    <div class="slider-container">
+                                        <div class="slider-label">
+                                            <span>目標多様性</span>
+                                            <span>{{ boidsConfig.target_entropy.toFixed(1) }}</span>
+                                        </div>
+                                        <input type="range" class="range-input" 
+                                               v-model="boidsConfig.target_entropy" 
+                                               min="1" max="10" step="0.1"
+                                               @input="updateBoidsConfig">
+                                    </div>
+                                    
+                                    <div class="form-check mt-3">
+                                        <input class="form-check-input" type="checkbox" 
+                                               v-model="boidsConfig.enabled" 
+                                               @change="updateBoidsConfig" id="boidsEnabled">
+                                        <label class="form-check-label" for="boidsEnabled">
+                                            BOIDSルール有効化
+                                        </label>
+                                    </div>
+                                    
+                                    <div class="mt-3">
+                                        <small class="text-muted">
+                                            安定性制約: λ_a + λ_c > λ_s
+                                            <br>
+                                            現在: {{ (parseFloat(boidsConfig.lambda_a) + parseFloat(boidsConfig.lambda_c)).toFixed(3) }} > {{ parseFloat(boidsConfig.lambda_s).toFixed(3) }}
+                                            <span v-if="parseFloat(boidsConfig.lambda_a) + parseFloat(boidsConfig.lambda_c) > parseFloat(boidsConfig.lambda_s)" class="text-success">✓</span>
+                                            <span v-else class="text-danger">✗</span>
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">Control Panel</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="control-panel">
+                                    <div class="mb-3">
+                                        <label for="promptInput" class="form-label">Live Prompt Inject</label>
+                                        <textarea class="form-control" id="promptInput" v-model="promptInput" rows="3" placeholder="Enter prompt to inject..."></textarea>
+                                    </div>
+                                    <button class="btn btn-primary" @click="injectPrompt">Inject Prompt</button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0">System Status</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">RAM Usage</div>
+                                        <div class="metrics-value">{{ systemStatus.ram }}%</div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <div class="text-muted">CPU Usage</div>
+                                        <div class="metrics-value">{{ systemStatus.cpu }}%</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                const { createApp, ref, onMounted, onUnmounted } = Vue;
+                
+                createApp({
+                    setup() {
+                        // リアクティブデータ
+                        const metrics = ref({
+                            entropy: 4.5,
+                            vdi: 0.7,
+                            fcr: 0.9,
+                            speed: 15.0
+                        });
+                        
+                        const blackboardMessages = ref([]);
+                        const promptInput = ref('');
+                        const systemStatus = ref({
+                            ram: 0,
+                            cpu: 0
+                        });
+                        
+                        const boidsConfig = ref({
+                            lambda_a: 0.3,
+                            lambda_c: 0.3,
+                            lambda_s: 0.1,
+                            target_entropy: 5.0,
+                            enabled: true
+                        });
+                        
+                        const boidsPresets = ref({});
+                        
+                        // WebSocket接続
+                        let socket = null;
+                        
+                        onMounted(() => {
+                            // ソケット接続
+                            socket = new WebSocket(`ws://${window.location.host}/ws`);
+                            
+                            socket.onopen = () => {
+                                console.log("WebSocket connected");
+                            };
+                            
+                            socket.onmessage = (event) => {
+                                const message = JSON.parse(event.data);
+                                handleSocketMessage(message);
+                            };
+                            
+                            socket.onclose = () => {
+                                console.log("WebSocket disconnected, retrying in 1 second...");
+                                setTimeout(() => {
+                                    connectWebSocket();
+                                }, 1000);
+                            };
+                        });
+                        
+                        onUnmounted(() => {
+                            if (socket) {
+                                socket.close();
+                            }
+                        });
+                        
+                        function handleSocketMessage(message) {
+                            if (message.type === "metrics") {
+                                metrics.value = message.data;
+                            } else if (message.type === "blackboard") {
+                                // BlackBoardメッセージの処理
+                                blackboardMessages.value = message.data.messages;
+                            } else if (message.type === "prompt_injected") {
+                                // プロンプト注入メッセージの処理
+                                const injectedMessage = {
+                                    agent_id: "あなた",
+                                    text: message.data.prompt,
+                                    timestamp: message.data.timestamp
+                                };
+                                blackboardMessages.value.unshift(injectedMessage);
+                            }
+                        }
+                        
+                        async function fetchInitialData() {
+                            try {
+                                // 初期メトリクスの取得
+                                const metricsResponse = await fetch("/api/metrics");
+                                if (metricsResponse.ok) {
+                                    metrics.value = await metricsResponse.json();
+                                }
+                                
+                                // 初期BlackBoardメッセージの取得
+                                const blackboardResponse = await fetch("/api/blackboard");
+                                if (blackboardResponse.ok) {
+                                    const blackboardData = await blackboardResponse.json();
+                                    blackboardMessages.value = blackboardData.messages;
+                                }
+                                
+                                // BOIDSプリセットの取得
+                                const presetsResponse = await fetch("/api/boids/presets");
+                                if (presetsResponse.ok) {
+                                    const presetsData = await presetsResponse.json();
+                                    boidsPresets.value = presetsData.presets;
+                                }
+                            } catch (error) {
+                                console.error("Error fetching initial data:", error);
+                            }
+                        }
+                        
+                        function connectWebSocket() {
+                            socket = new WebSocket(`ws://${window.location.host}/ws`);
+                            
+                            socket.onopen = () => {
+                                console.log("WebSocket re-connected");
+                            };
+                            
+                            socket.onmessage = (event) => {
+                                const message = JSON.parse(event.data);
+                                handleSocketMessage(message);
+                            };
+                        }
+                        
+                        // プロンプト注入
+                        async function injectPrompt() {
+                            if (!promptInput.value.trim()) return;
+                            
+                            try {
+                                const response = await fetch("/api/inject", {
+                                    method: "POST",
+                                    headers: {
+                                        "Content-Type": "application/json"
+                                    },
+                                    body: JSON.stringify({ prompt: promptInput.value })
+                                });
+                                
+                                const result = await response.json();
+                                if (result.status === "success") {
+                                    promptInput.value = "";
+                                } else {
+                                    console.error("Error injecting prompt:", result.message);
+                                }
+                            } catch (error) {
+                                console.error("Error injecting prompt:", error);
+                            }
+                        }
+                        
+                        // BOIDS設定の手動調整
+                        async function updateBoidsConfig() {
+                            try {
+                                await fetch("/api/boids/config", {
+                                    method: "POST",
+                                    headers: {
+                                        "Content-Type": "application/json"
+                                    },
+                                    body: JSON.stringify({ config: boidsConfig.value })
+                                });
+                            } catch (error) {
+                                console.error("Error updating BOIDS config:", error);
+                            }
+                        }
+                        
+                        return {
+                            metrics,
+                            blackboardMessages,
+                            promptInput,
+                            systemStatus,
+                            boidsConfig,
+                            boidsPresets,
+                            injectPrompt,
+                            updateBoidsConfig
+                        };
+                    }
+                }).mount("#app");
+            </script>
+        </body>
+        </html>
+        """
     
     async def broadcast(self, message: Dict[str, Any]):
         """全クライアントにメッセージをブロードキャスト"""

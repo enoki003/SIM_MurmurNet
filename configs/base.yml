@@ -1,0 +1,89 @@
+# SLM Emergent AI Base Configuration
+# This file contains the base configuration for the SLM Emergent AI system
+
+# Model Configuration
+model:
+  path: "google/gemma-2-2b-it"  # Model path or HuggingFace identifier
+  quantize: "q4"                # Quantization level
+  n_ctx: 512                    # Context length
+  boids_logits_params:
+    enabled: true
+    w_align: 0.1
+    w_sep: 0.1
+    w_cohesion: 0.1
+    n_align_tokens: 10
+    m_sep_tokens: 10
+    theta_sep: 0.8
+    cohesion_prompt_text: "みんなで協力して問題解決に取り組み、お互いの理解を深めながら、革新的なアイデアを生み出していきましょう。"
+
+# BOIDS Discussion Rules Configuration
+boids:
+  enabled: true
+  weights:
+    lambda_a: 0.3      # Alignment weight (共感性・意見の調和)
+    lambda_c: 0.3      # Cohesion weight (結束力・話題の統一感)
+    lambda_s: 0.1      # Separation weight (独自性・個性的な発言)
+  thresholds:
+    similarity_threshold: 0.9      # 一般的な類似度閾値
+    diversity_threshold: 0.7       # 多様性の閾値（この値より高い類似度で多様性不足と判定）
+    alignment_threshold: 0.8       # 共感の閾値  
+    cohesion_threshold: 0.6        # 結束の閾値
+  dynamic_adjustment:
+    enabled: true                  # 動的調整の有効化
+    adjustment_rate: 0.02          # 基本調整レート
+    vdi_adjustment_rates:          # VDI レベル別調整レート
+      very_low: 0.08              # VDI < 0.2
+      low: 0.04                   # VDI < 0.4
+      high: 0.03                  # VDI > 0.6
+      very_high: 0.06             # VDI > 0.8
+    entropy_adjustment_rate: 0.02  # エントロピー誤差調整レート
+    stability_constraint: true     # 安定性制約 (λ_a + λ_c > λ_s)
+    target_entropy: 5.0           # 目標エントロピー値
+    diagonal_removal: true         # 対角セル除去の有効化
+    entropy_sign_correction: true  # エントロピー符号修正の有効化
+
+# Agent Configuration
+agent:
+  n: 3
+  roles: ["Agent", "Agent", "Agent"]
+
+# Controller Configuration (PID + Q-learning)
+controller:
+  target_H: 5.0
+  Kp: 0.1
+  Ki: 0.01
+  Kd: 0.05
+  early_stop: false
+
+# Memory Configuration
+memory:
+  mode: "local"        # "local" or "redis"
+  redis_url: null      # Redis URL if using redis mode
+
+# Runtime Configuration
+runtime:
+  threads: 4
+
+# Initial Prompts
+prompts:
+  initial:
+    - "みなさんと一緒に、建設的で楽しい議論をしていきたいと思います。どんな話題から始めましょうか？"
+    - "新しい視点から物事を考えて、創造的な解決策を見つけていきませんか？"
+    - "お互いの意見を尊重しながら、より良いアイデアを生み出していきましょう。"
+
+# Evaluation Configuration
+evaluation:
+  enabled: true
+  freq: 5              # Log metrics every N steps
+
+# UI Configuration
+ui:
+  enabled: true
+  port: 7860
+
+# RAG Configuration
+rag:
+  enabled: false
+  backend: "chroma"    # "chroma" or "elastic"
+  config:
+    persist_directory: "./chroma_db"
